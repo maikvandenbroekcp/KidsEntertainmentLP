@@ -58314,6 +58314,8 @@ const DbThread = ({
   placeholder = "Schrijf een reactie… (@naam om te taggen)",
   emptyText,
   compact = false,
+  groupOf, // (bericht) => kopje; toont een kopje zodra de groep wisselt
+  inputExtra, // extra knoppen boven het invoerveld
 }) => {
   const [text, setText] = useState("");
   const [important, setImportant] = useState(false);
@@ -58329,9 +58331,18 @@ const DbThread = ({
       {items.length === 0 && emptyText && (
         <p className="text-xs text-gray-400 italic">{emptyText}</p>
       )}
-      {items.map((m) => (
+      {items.map((m, idx) => (
+        <React.Fragment key={m.id}>
+        {groupOf && (idx === 0 || groupOf(items[idx - 1]) !== groupOf(m)) && (
+          <p
+            className={`text-[11px] font-bold uppercase tracking-wide text-gray-400 ${
+              idx === 0 ? "" : "pt-2 border-t border-gray-100"
+            }`}
+          >
+            {groupOf(m)}
+          </p>
+        )}
         <div
-          key={m.id}
           className={`flex gap-2 group ${m.important ? "rounded-xl p-2 -mx-1" : ""}`}
           style={m.important ? { backgroundColor: "#FEF3C7" } : undefined}
         >
@@ -58376,7 +58387,9 @@ const DbThread = ({
             )}
           </div>
         </div>
+        </React.Fragment>
       ))}
+      {inputExtra}
       <div className="flex gap-2 items-end">
         <div className="flex-1">
           <MentionTextarea
@@ -58937,7 +58950,7 @@ const getDagbordAttention = (appData, loggedInUserName) => {
   for (const [k, v] of Object.entries(day)) {
     if (!v || v.deleted || v.author === loggedInUserName) continue;
     // Doorgegeven door de vorige dienst + belangrijke berichten: nog niet gezien
-    if (k.startsWith("door_")) {
+    if (k.startsWith("door_") || k.startsWith("c_")) {
       const mijn = dbMyAfdeling(appData, today, loggedInUserName);
       if (v.afdeling && v.afdeling !== "alle" && mijn && v.afdeling !== mijn) continue;
     }
@@ -59001,6 +59014,7 @@ const DagbordView = ({
   const [doorText, setDoorText] = useState("");
   const [doorAsPunt, setDoorAsPunt] = useState(false);
   const [doorAfd, setDoorAfd] = useState(null); // null = automatisch (eigen afdeling)
+  const [teamAfd, setTeamAfd] = useState("alle"); // afdeling voor een nieuw teambericht
   const [corrReason, setCorrReason] = useState("");
   const [corrSent, setCorrSent] = useState(false);
   const [editClock, setEditClock] = useState(null); // { name, in, out }
@@ -59190,7 +59204,7 @@ const DagbordView = ({
     save({ [`read_${dbSlug(me)}`]: { name: me, at: Date.now() } });
 
   const myRead = () => ({ [dbSlug(me)]: { name: me, at: Date.now() } });
-  const addComment = (target, text, label, important = false) => {
+  const addComment = (target, text, label, important = false, afd = null) => {
     const id = dbNewId();
     save(
       {
@@ -59201,6 +59215,7 @@ const DagbordView = ({
           text,
           at: Date.now(),
           important: !!important,
+          ...(afd ? { afdeling: afd } : {}),
         },
       },
       null,
@@ -60440,13 +60455,52 @@ const DagbordView = ({
           <DbCard
             icon={MessageCircle}
             title="Teamberichten"
-            subtitle="Algemene opmerkingen"
+            subtitle="Algemene opmerkingen, per afdeling of voor iedereen"
           >
             <DbThread
-              items={commentsFor("day")}
+              items={commentsFor("day")
+                .filter((c) => matchAfd(c.afdeling))
+                .sort((a, b) => {
+                  // Eerst "Alle afdelingen", daarna per afdeling, binnen een groep op tijd
+                  const ia = DB_AFDELINGEN.findIndex((x) => x.id === (a.afdeling || "alle"));
+                  const ib = DB_AFDELINGEN.findIndex((x) => x.id === (b.afdeling || "alle"));
+                  return ia - ib || (a.at || 0) - (b.at || 0);
+                })}
+              groupOf={(c) =>
+                !c.afdeling || c.afdeling === "alle"
+                  ? "Alle afdelingen"
+                  : dbAfdeling(c.afdeling).label
+              }
+              inputExtra={
+                <div className="flex flex-wrap items-center gap-1 pt-1">
+                  <span className="text-[11px] text-gray-400 mr-0.5">Voor:</span>
+                  {DB_AFDELINGEN.map((a) => (
+                    <button
+                      key={a.id}
+                      onClick={() => setTeamAfd(a.id)}
+                      className="text-[11px] font-semibold px-2.5 py-0.5 rounded-full border"
+                      style={
+                        teamAfd === a.id
+                          ? { backgroundColor: a.text, color: "white", borderColor: a.text }
+                          : { backgroundColor: "white", color: a.text, borderColor: `${a.text}33` }
+                      }
+                    >
+                      {a.id === "alle" ? "Iedereen" : a.label}
+                    </button>
+                  ))}
+                </div>
+              }
               staffList={staffList}
               loggedInUserName={me}
-              onSend={(t, imp) => addComment("day", t, "Teamberichten", imp)}
+              onSend={(t, imp) =>
+                addComment(
+                  "day",
+                  t,
+                  teamAfd === "alle" ? "Teamberichten" : `Teamberichten ${dbAfdeling(teamAfd).label}`,
+                  imp,
+                  teamAfd
+                )
+              }
               onRead={readComment}
               onDelete={deleteComment}
               emptyText="Nog geen berichten vandaag."
