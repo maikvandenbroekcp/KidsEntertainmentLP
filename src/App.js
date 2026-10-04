@@ -59766,18 +59766,114 @@ const DagbordView = ({
               {openPunten.length} open {openPunten.length === 1 ? "punt" : "punten"}
             </DbPill>
           )}
-          {(isToday || isPastDay) && (
+          {isPastDay && (
             <button
               onClick={() => setShowClose(true)}
               className="text-[11px] font-semibold px-2.5 py-1 rounded-full flex items-center gap-1"
-              style={{ backgroundColor: C.Bark, color: "white" }}
+              style={{ backgroundColor: `${C.Bark}14`, color: C.Bark }}
             >
-              <Moon size={11} /> Dienst afsluiten
-              {outgoing.length > 0 && ` · ${outgoing.length} doorgegeven`}
+              <Moon size={11} /> Afsluiting en doorgeven
             </button>
           )}
         </div>
       </div>
+
+      {/* Bezetting van de dag */}
+      {(() => {
+        const st = appData.dailyStats?.[dateKey] || {};
+        const total =
+          st.total > 0 ? st.total : (st.adults || 0) + (st.kids || 0) + (st.babies || 0);
+        if (!total && !st.villas) {
+          return isFM ? (
+            <p className="text-xs text-gray-400 px-1">
+              Nog geen bezetting ingevoerd voor deze dag.
+            </p>
+          ) : null;
+        }
+        const barTotal = (st.adults || 0) + (st.kids || 0) + (st.babies || 0) || 1;
+        const segs = [
+          { label: "Volwassenen", count: st.adults || 0, color: C.Pine },
+          { label: "Kinderen", count: st.kids || 0, color: C.Honey },
+          { label: "Baby's", count: st.babies || 0, color: C.Blossom },
+        ].filter((x) => x.count > 0);
+        const nats = NATIONALITIES.filter((n) => (st.breakdown?.[n.k] || 0) > 0)
+          .map((n) => ({ ...n, pct: Math.round((st.breakdown[n.k] / (total || 1)) * 100) }))
+          .sort((a, b) => b.pct - a.pct)
+          .slice(0, 4);
+        // Drukte zoals het team die in de verslagen van deze dag gaf
+        const crowds = [
+          ...newReports.map((r) => r.crowd),
+          ...["ent", "crea"].flatMap((k) =>
+            legacyArr(k).flatMap((e) => Object.values(e?.actFields || {}).map((af) => af.crowd))
+          ),
+        ].filter((x) => x >= 1 && x <= 5);
+        const avgCrowd = crowds.length
+          ? Math.round(crowds.reduce((a, b) => a + b, 0) / crowds.length)
+          : null;
+        return (
+          <div className="bg-white rounded-2xl border border-gray-100 shadow-sm px-4 py-3 flex flex-wrap items-center gap-x-5 gap-y-2">
+            <div className="flex items-center gap-2.5">
+              <div
+                className="w-9 h-9 rounded-xl flex items-center justify-center"
+                style={{ backgroundColor: `${C.Pine}1A` }}
+              >
+                <Users size={18} style={{ color: C.Pine }} />
+              </div>
+              <div>
+                <p className="text-lg font-bold leading-tight" style={{ color: C.Lagoon }}>
+                  {total.toLocaleString("nl-NL")}{" "}
+                  <span className="text-xs font-semibold text-gray-500">gasten</span>
+                </p>
+                <p className="text-[11px] text-gray-500">
+                  {st.kids ? `${st.kids} kinderen` : ""}
+                  {st.kids && st.babies ? " · " : ""}
+                  {st.babies ? `${st.babies} baby's` : ""}
+                  {st.villas ? `${st.kids || st.babies ? " · " : ""}${st.villas} cottages` : ""}
+                </p>
+              </div>
+            </div>
+            {segs.length > 0 && (
+              <div className="flex-1 min-w-[140px]">
+                <div className="flex h-2 rounded-full overflow-hidden bg-gray-100">
+                  {segs.map((g) => (
+                    <div
+                      key={g.label}
+                      title={`${g.label}: ${g.count}`}
+                      style={{ width: `${(g.count / barTotal) * 100}%`, backgroundColor: g.color }}
+                    />
+                  ))}
+                </div>
+                <div className="flex gap-3 mt-1">
+                  {segs.map((g) => (
+                    <span key={g.label} className="text-[11px] text-gray-500 flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full" style={{ backgroundColor: g.color }} />
+                      {g.label} {Math.round((g.count / barTotal) * 100)}%
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {nats.length > 0 && (
+              <div className="flex flex-wrap gap-1">
+                {nats.map((n) => (
+                  <span
+                    key={n.k}
+                    className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-gray-50 border border-gray-100 text-gray-600"
+                  >
+                    {n.i} {n.pct}%
+                  </span>
+                ))}
+              </div>
+            )}
+            {avgCrowd && (
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] text-gray-500">Drukte volgens team</span>
+                <DbCrowdChip lvl={avgCrowd} />
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* FM-briefing */}
       <div
