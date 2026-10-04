@@ -58858,16 +58858,44 @@ const dbWorked = (clock, planned) => {
   return { min: Math.max(0, total - pauze), pauze, pauzes };
 };
 const DB_TOLERANTIE = 5;
+const dbAfdFromText = (t) => {
+  const x = String(t || "").toLowerCase();
+  if (x.includes("hotspot")) return "hotspot";
+  if (x.includes("spring") || x.includes("kussen")) return "springkussen";
+  if (x.includes("crea") || x.includes("atelier")) return "crea";
+  if (x.includes("entertain") || x.includes("ent ")) return "entertainment";
+  return null;
+};
+const DB_WERK_TYPES = ["entertainment", "crea", "springkussen", "overig"];
+// Afdeling van een roostermaker-dienst (null = onbekend / verlof)
+const dbDienstAfdeling = (d) => {
+  if (!d || !DB_WERK_TYPES.includes(d.type)) return null;
+  if (d.type !== "overig") return d.type;
+  return dbAfdFromText(d.title);
+};
+// Eerstvolgende echte dienst van een afdeling ná (datum, minuut).
+// afd "alle" = eerstvolgende dienst van welke afdeling dan ook.
+const dbNextDienst = (appData, afd, fromDateKey, fromMin) => {
+  const [y, m, d0] = fromDateKey.split("-").map(Number);
+  for (let i = 0; i <= 21; i++) {
+    const dk = toIsoDate(new Date(y, m - 1, d0 + i, 12));
+    const list = (appData.roosterDiensten?.[dk] || [])
+      .filter((d) => {
+        const a = dbDienstAfdeling(d);
+        if (!a && !(afd === "alle" && d && DB_WERK_TYPES.includes(d.type))) return false;
+        if (afd !== "alle" && a !== afd) return false;
+        const st = dbToMin(d.start);
+        if (st == null) return false;
+        return i > 0 || st > fromMin;
+      })
+      .sort((a, b) => dbToMin(a.start) - dbToMin(b.start));
+    if (list.length) return { dateKey: dk, dienst: list[0] };
+  }
+  return null;
+};
 // Afdeling waarop iemand die dag ingeroosterd staat (null = onbekend)
 const dbMyAfdeling = (appData, dateKey, name) => {
-  const fromText = (t) => {
-    const x = String(t || "").toLowerCase();
-    if (x.includes("hotspot")) return "hotspot";
-    if (x.includes("spring") || x.includes("kussen")) return "springkussen";
-    if (x.includes("crea") || x.includes("atelier")) return "crea";
-    if (x.includes("entertain") || x.includes("ent ")) return "entertainment";
-    return null;
-  };
+  const fromText = dbAfdFromText;
   const rd = (appData.roosterDiensten?.[dateKey] || []).find((d) =>
     (d.assigned || []).includes(name)
   );
@@ -58909,6 +58937,10 @@ const getDagbordAttention = (appData, loggedInUserName) => {
   for (const [k, v] of Object.entries(day)) {
     if (!v || v.deleted || v.author === loggedInUserName) continue;
     // Doorgegeven door de vorige dienst + belangrijke berichten: nog niet gezien
+    if (k.startsWith("door_")) {
+      const mijn = dbMyAfdeling(appData, today, loggedInUserName);
+      if (v.afdeling && v.afdeling !== "alle" && mijn && v.afdeling !== mijn) continue;
+    }
     if ((k.startsWith("door_") || (k.startsWith("c_") && v.important)) && !v.reads?.[slug])
       n++;
   }
@@ -58968,6 +59000,7 @@ const DagbordView = ({
   const [closeHidden, setCloseHidden] = useState(false); // herinnering weggeklikt
   const [doorText, setDoorText] = useState("");
   const [doorAsPunt, setDoorAsPunt] = useState(false);
+  const [doorAfd, setDoorAfd] = useState(null); // null = automatisch (eigen afdeling)
   const [corrReason, setCorrReason] = useState("");
   const [corrSent, setCorrSent] = useState(false);
   const [editClock, setEditClock] = useState(null); // { name, in, out }
@@ -59177,30 +59210,69 @@ const DagbordView = ({
   const deleteComment = (c) => save({ [`c_${c.id}`]: { deleted: true } });
   const readComment = (c) => save({ [`c_${c.id}`]: { reads: myRead() } });
 
-  // ── Doorgeven aan de volgende dag ──────────────────────────────────
-  const nextDate = new Date(currentDay);
-  nextDate.setDate(nextDate.getDate() + 1);
-  const nextKey = toIsoDate(nextDate);
-  const prevDate = new Date(currentDay);
-  prevDate.setDate(prevDate.getDate() - 1);
+  // ── Doorgeven aan de volgende dienst van de afdeling ──────────────
   const dagNaam = (d) =>
     d.toLocaleDateString("nl-NL", { weekday: "long", day: "numeric", month: "short" });
+  const dagNaamKey = (k) => dagNaam(parseDateKey(k));
   const incoming = Object.entries(day)
-    .filter(([k, v]) => k.startsWith("door_") && v && !v.deleted)
+    .filter(([k, v]) => k.startsWith("door_") && v && !v.deleted && matchAfd(v.afdeling))
     .map(([, v]) => v)
     .sort((a, b) => (a.at || 0) - (b.at || 0));
-  const outgoing = Object.entries(appData.dagbord?.[nextKey] || {})
-    .filter(([k, v]) => k.startsWith("door_") && v && !v.deleted && v.author === me)
-    .map(([, v]) => v);
+  const doorTargetAfd =
+    doorAfd || ingeplandOp || (afdeling !== "alle" ? afdeling : "alle");
+  const doorFromMin = isToday
+    ? new Date().getHours() * 60 + new Date().getMinutes()
+    : 24 * 60; // eerdere dag afsluiten → vanaf de dag erna zoeken
+  const doorTarget = (() => {
+    const nd = dbNextDienst(appData, doorTargetAfd, dateKey, doorFromMin);
+    if (nd) return nd;
+    // Nog geen dienst ingepland → de volgende kalenderdag
+    const t = new Date(currentDay);
+    t.setDate(t.getDate() + 1);
+    return { dateKey: toIsoDate(t), dienst: null };
+  })();
+  const doorTargetLabel = (() => {
+    const dname = dagNaamKey(doorTarget.dateKey);
+    const sameDay = doorTarget.dateKey === dateKey;
+    if (!doorTarget.dienst)
+      return `Nog geen ${doorTargetAfd === "alle" ? "" : dbAfdeling(doorTargetAfd).label.toLowerCase() + "-"}dienst ingepland — komt op ${dname}`;
+    const dd = doorTarget.dienst;
+    const wie = (dd.assigned || []).filter(Boolean);
+    return `Komt bij de ${doorTargetAfd === "alle" ? "volgende" : dbAfdeling(doorTargetAfd).label.toLowerCase()}dienst van ${
+      sameDay ? "vandaag" : dname
+    } ${dd.start}${dd.end ? `–${dd.end}` : ""}${wie.length ? ` (${wie.join(", ")})` : ""}`;
+  })();
+  // Wat ik vanaf deze dag heb doorgegeven (kan op een latere datum staan)
+  const outgoing = Object.entries(appData.dagbord || {})
+    .filter(([dk]) => dk >= dateKey)
+    .flatMap(([dk, dd]) =>
+      Object.entries(dd || {})
+        .filter(
+          ([k, v]) =>
+            k.startsWith("door_") && v && !v.deleted && v.author === me && v.fromDate === dateKey
+        )
+        .map(([, v]) => ({ ...v, _dk: dk }))
+    );
   const sendDoorgeven = () => {
     const text = doorText.trim();
     if (!text) return;
     const id = dbNewId();
     const now = Date.now();
+    const dd = doorTarget.dienst;
     const updates = {
       dagbord: {
-        [nextKey]: {
-          [`door_${id}`]: { id, author: me, text, fromDate: dateKey, at: now },
+        [doorTarget.dateKey]: {
+          [`door_${id}`]: {
+            id,
+            author: me,
+            text,
+            fromDate: dateKey,
+            at: now,
+            afdeling: doorTargetAfd,
+            voorDienst: dd
+              ? { start: dd.start || "", end: dd.end || "", assigned: dd.assigned || [] }
+              : null,
+          },
         },
       },
     };
@@ -59210,7 +59282,7 @@ const DagbordView = ({
         [pid]: {
           id: pid,
           title: text.length > 90 ? text.slice(0, 87) + "…" : text,
-          afdeling: afdeling,
+          afdeling: doorTargetAfd,
           author: me,
           createdAt: now,
           assignee: "",
@@ -59220,13 +59292,13 @@ const DagbordView = ({
         },
       };
     }
-    const notifs = mentionNotifs(text, "Doorgegeven voor morgen");
+    const notifs = mentionNotifs(text, "Doorgegeven aan de volgende dienst");
     if (notifs.length > 0)
       updates.notifications = [...(appData.notifications || []), ...notifs];
     updateData(updates);
     setDoorText("");
     setDoorAsPunt(false);
-    cpToast("Doorgegeven aan de volgende dag", "success");
+    cpToast(`Doorgegeven · ${dagNaamKey(doorTarget.dateKey)}`, "success");
   };
   const readDoor = (d) => save({ [`door_${d.id}`]: { reads: myRead() } });
   const deleteDoorFrom = (d, key) =>
@@ -59652,7 +59724,15 @@ const DagbordView = ({
     const r = reportsFor(a.id);
     return r.nieuw.length + r.oud.length === 0;
   });
-  const openDayTasks = allTasks.filter((t) => !t.done && !t.nvt);
+  // Afsluiten: alleen taken van je eigen dienst, los van het gekozen filter
+  // (niet ingepland → alle afdelingen)
+  const openDayTasks = TASK_TYPES.filter(
+    ({ afd }) => !ingeplandOp || afd === ingeplandOp
+  )
+    .flatMap(({ type, afd }) =>
+      (getDailyTasks ? getDailyTasks(type) : []).map((t) => ({ ...t, _afd: afd }))
+    )
+    .filter((t) => !t.done && !t.nvt);
   const myPunten = openPunten.filter((p) => p.assignee === me);
 
   return (
@@ -60066,9 +60146,6 @@ const DagbordView = ({
             <p className="text-sm font-bold" style={{ color: C.Bark }}>
               Doorgegeven door de vorige dienst
             </p>
-            <span className="text-[11px]" style={{ color: C.Bark }}>
-              {dagNaam(prevDate)}
-            </span>
           </div>
           <div className="px-4 py-2 divide-y divide-gray-100">
             {incoming.map((d) => (
@@ -60079,7 +60156,22 @@ const DagbordView = ({
                     <span className="text-xs font-semibold" style={{ color: C.Lagoon }}>
                       {d.author}
                     </span>
-                    <span className="text-[11px] text-gray-400">{dbAgo(d.at)}</span>
+                    <span className="text-[11px] text-gray-400">
+                      {d.fromDate && d.fromDate !== dateKey
+                        ? `${dagNaamKey(d.fromDate)} · ${dbTime(d.at)}`
+                        : dbAgo(d.at)}
+                    </span>
+                    {d.afdeling && d.afdeling !== "alle" && (
+                      <DbPill bg={dbAfdeling(d.afdeling).bg} text={dbAfdeling(d.afdeling).text}>
+                        {dbAfdeling(d.afdeling).label}
+                      </DbPill>
+                    )}
+                    {d.voorDienst?.start && (
+                      <span className="text-[11px] text-gray-400">
+                        voor {d.voorDienst.start}
+                        {d.voorDienst.end ? `–${d.voorDienst.end}` : ""}
+                      </span>
+                    )}
                     {d.author === me && (
                       <button
                         onClick={() => deleteDoorFrom(d, dateKey)}
@@ -60157,7 +60249,10 @@ const DagbordView = ({
               {openDayTasks.length > 0 && (
                 <div>
                   <p className="text-xs font-bold mb-1" style={{ color: C.Lagoon }}>
-                    Taken die nog openstaan ({openDayTasks.length})
+                    {ingeplandOp
+                      ? `Taken van je ${dbAfdeling(ingeplandOp).label.toLowerCase()}dienst die nog openstaan`
+                      : "Taken die nog openstaan"}{" "}
+                    ({openDayTasks.length})
                   </p>
                   {openDayTasks.slice(0, 10).map((t) => renderTask(t))}
                   {openDayTasks.length > 10 && (
@@ -60181,14 +60276,36 @@ const DagbordView = ({
                 <p className="text-sm font-semibold" style={{ color: C.Bark }}>
                   Moet de volgende dienst iets weten?
                 </p>
+                <div className="flex flex-wrap gap-1">
+                  {DB_AFDELINGEN.map((a) => (
+                    <button
+                      key={a.id}
+                      onClick={() => setDoorAfd(a.id)}
+                      className="text-[11px] font-semibold px-2.5 py-1 rounded-full border"
+                      style={
+                        doorTargetAfd === a.id
+                          ? { backgroundColor: a.text, color: "white", borderColor: a.text }
+                          : { backgroundColor: "white", color: a.text, borderColor: `${a.text}33` }
+                      }
+                    >
+                      {a.id === "alle" ? "Hele team" : a.label}
+                    </button>
+                  ))}
+                </div>
                 <p className="text-[11px]" style={{ color: C.Bark }}>
-                  Verschijnt op {dagNaam(nextDate)} bovenaan het dagbord, met leesbevestiging.
+                  {doorTargetLabel}. Bovenaan het dagbord, met leesbevestiging.
                 </p>
                 {outgoing.map((d) => (
                   <div key={d.id} className="flex gap-2 items-start bg-white rounded-lg px-2.5 py-1.5">
-                    <p className="text-xs text-gray-700 flex-1 whitespace-pre-wrap">{d.text}</p>
+                    <p className="text-xs text-gray-700 flex-1 whitespace-pre-wrap">
+                      <span className="text-[11px] text-gray-400">
+                        {dagNaamKey(d._dk)}
+                        {d.afdeling && d.afdeling !== "alle" ? ` · ${dbAfdeling(d.afdeling).label}` : ""}:{" "}
+                      </span>
+                      {d.text}
+                    </p>
                     <button
-                      onClick={() => deleteDoorFrom(d, nextKey)}
+                      onClick={() => deleteDoorFrom(d, d._dk)}
                       className="text-gray-300 hover:text-red-500"
                       title="Verwijderen"
                     >
@@ -60217,7 +60334,10 @@ const DagbordView = ({
                   className="w-full py-2 rounded-xl text-sm font-semibold text-white"
                   style={{ backgroundColor: C.Bark, opacity: doorText.trim() ? 1 : 0.5 }}
                 >
-                  Doorgeven aan {dagNaam(nextDate)}
+                  Doorgeven
+                  {doorTarget.dienst
+                    ? ` aan ${doorTargetAfd === "alle" ? "volgende dienst" : dbAfdeling(doorTargetAfd).label}`
+                    : ""}
                 </button>
               </div>
               {isToday && myClock.in && !myClock.out ? (
