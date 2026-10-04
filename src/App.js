@@ -4120,11 +4120,19 @@ const HandoverEntryForm = ({
   });
   const relevantActivities = type === "ent" ? entActivities : creaActivities;
 
-  const setActField = (actId, field, val) =>
+  const setActField = (actId, field, val) => {
     setActFields((prev) => ({
       ...prev,
       [actId]: { ...(prev[actId] || {}), [field]: val },
     }));
+    // Na een wijziging is de activiteit niet meer 'opgeslagen'
+    setSavedActIds((prev) => {
+      if (!prev.has(actId)) return prev;
+      const next = new Set(prev);
+      next.delete(actId);
+      return next;
+    });
+  };
 
   // Detect activity type for special fields
   const getActType = (title = "") => {
@@ -5529,6 +5537,7 @@ const HandoverSection = ({
                                     t.includes("voorlees")
                                   )
                                     return "verhaal";
+                                  if (t.includes("prize")) return "prizenight";
                                   return "generic";
                                 })();
                                 const acColor =
