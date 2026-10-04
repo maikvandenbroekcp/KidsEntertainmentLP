@@ -58134,6 +58134,19 @@ const dbTime = (ts) =>
         minute: "2-digit",
       })
     : "";
+// "14:05" als het op de getoonde dag was, anders "di 29 sep · 14:05"
+const dbWhen = (ts, dateKey) => {
+  if (!ts) return "";
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return "";
+  if (toIsoDate(d) === dateKey) return dbTime(ts);
+  const dag = d.toLocaleDateString("nl-NL", {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+  });
+  return `${dag} · ${dbTime(ts)}`;
+};
 const dbAgo = (ts) => {
   if (!ts) return "";
   const d0 = new Date(ts);
@@ -58689,6 +58702,7 @@ const DagbordView = ({
   const [editingBriefing, setEditingBriefing] = useState(false);
   const [briefingDraft, setBriefingDraft] = useState("");
   const [showResolved, setShowResolved] = useState(false);
+  const [showExtraDone, setShowExtraDone] = useState(false);
   const [showLegacy, setShowLegacy] = useState(false);
   const [newPunt, setNewPunt] = useState(null); // { title, afdeling, assignee, note }
 
@@ -58804,11 +58818,19 @@ const DagbordView = ({
     { type: "entertainment", afd: "entertainment" },
     { type: "crea", afd: "crea" },
     { type: "hotspot", afd: "hotspot" },
-    { type: "extra", afd: "alle" },
   ];
   const allTasks = TASK_TYPES.flatMap(({ type, afd }) =>
     (getDailyTasks ? getDailyTasks(type) : []).map((t) => ({ ...t, _afd: afd }))
   ).filter((t) => matchAfd(t._afd));
+  // Extra taken (lopen over meerdere dagen) staan los van de dagplanning
+  const extraTasks = (getDailyTasks ? getDailyTasks("extra") : []).map((t) => ({
+    ...t,
+    _afd: "alle",
+  }));
+  const extraOpen = extraTasks.filter((t) => !t.done && !t.nvt);
+  const extraDone = extraTasks
+    .filter((t) => t.done || t.nvt)
+    .sort((a, b) => new Date(b.doneAt || 0) - new Date(a.doneAt || 0));
   const phaseOf = (t) =>
     t.category === "startup" ? "opstart" : t.category === "closing" ? "afsluiting" : "gedurende";
   const tasksIn = (ph) => allTasks.filter((t) => phaseOf(t) === ph);
@@ -58996,7 +59018,9 @@ const DagbordView = ({
           </p>
           {(t.done && t.doneBy) || t.nvt ? (
             <p className="text-[11px] text-gray-400">
-              {t.nvt ? "n.v.t." : `${t.doneBy}${t.doneAt ? ` · ${dbTime(t.doneAt)}` : ""}`}
+              {t.nvt
+                ? "n.v.t."
+                : `Gedaan door ${t.doneBy}${t.doneAt ? ` · ${dbWhen(t.doneAt, dateKey)}` : ""}`}
             </p>
           ) : null}
         </div>
@@ -59189,6 +59213,11 @@ const DagbordView = ({
               {actsWithReport.length}/{actsDue.length} verslagen
             </DbPill>
           )}
+          {extraOpen.length > 0 && (
+            <DbPill bg="#EEF3FE" text={C.Lagoon}>
+              {extraOpen.length} extra {extraOpen.length === 1 ? "taak" : "taken"}
+            </DbPill>
+          )}
           {openPunten.length > 0 && (
             <DbPill bg="#FEF3C7" text="#92400E">
               {openPunten.length} open {openPunten.length === 1 ? "punt" : "punten"}
@@ -59322,6 +59351,39 @@ const DagbordView = ({
         </DbCard>
 
         <div className="space-y-4">
+          {/* Extra taken */}
+          {extraTasks.length > 0 && (
+            <DbCard
+              icon={CheckSquare}
+              accent={C.Lagoon}
+              title="Extra taken"
+              subtitle={
+                extraOpen.length > 0
+                  ? `${extraOpen.length} nog te doen · blijven staan tot ze af zijn`
+                  : "Alles afgerond"
+              }
+            >
+              {extraOpen.length === 0 && (
+                <p className="text-xs text-gray-400 italic py-1">
+                  Geen openstaande extra taken.
+                </p>
+              )}
+              {extraOpen.map((t) => renderTask(t))}
+              {extraDone.length > 0 && (
+                <div className="mt-2 pt-2 border-t border-gray-100">
+                  <button
+                    onClick={() => setShowExtraDone((v) => !v)}
+                    className="text-xs font-semibold text-gray-400 hover:text-gray-600 flex items-center gap-1"
+                  >
+                    {showExtraDone ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                    Afgerond ({extraDone.length})
+                  </button>
+                  {showExtraDone && extraDone.map((t) => renderTask(t))}
+                </div>
+              )}
+            </DbCard>
+          )}
+
           {/* Open punten */}
           <DbCard
             icon={AlertTriangle}
