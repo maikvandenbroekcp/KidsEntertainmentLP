@@ -60221,7 +60221,7 @@ const DagbordView = ({
           <DbCard
             icon={MessageCircle}
             title="Teamberichten"
-            subtitle="Voor iedereen die vandaag werkt"
+            subtitle="Algemene opmerkingen"
           >
             <DbThread
               items={commentsFor("day")}
@@ -60231,7 +60231,7 @@ const DagbordView = ({
               onRead={readComment}
               onDelete={deleteComment}
               emptyText="Nog geen berichten vandaag."
-              placeholder="Deel iets met het team… (@naam of @team)"
+              placeholder="Algemene opmerking… (@naam of @team)"
             />
           </DbCard>
 
