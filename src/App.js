@@ -58805,13 +58805,57 @@ const dbPlanned = (appData, dateKey, name) => {
     (d.assigned || []).includes(name)
   );
   if (rd && (rd.start || rd.end))
-    return { start: rd.start || "", end: rd.end || "", code: rd.urencode || "" };
+    return {
+      start: rd.start || "",
+      end: rd.end || "",
+      code: rd.urencode || "",
+      breaks: Array.isArray(rd.breaks) ? rd.breaks : [],
+    };
   const ws = (appData.workSchedule?.[dateKey] || []).find(
     (x) => x.matchedUser === name
   );
   if (ws && (ws.start || ws.end))
-    return { start: ws.start || "", end: ws.end || "", code: "" };
+    return {
+      start: ws.start || "",
+      end: ws.end || "",
+      code: "",
+      breaks:
+        ws.pauzeStart && ws.pauzeEnd
+          ? [{ start: ws.pauzeStart, end: ws.pauzeEnd }]
+          : Array.isArray(ws.breaks)
+          ? ws.breaks
+          : [],
+    };
   return null;
+};
+// "23 min" of "1u 05m"
+const dbMinLabel = (m) => {
+  const v = Math.max(0, Math.round(m));
+  return v >= 60
+    ? `${Math.floor(v / 60)}u ${String(v % 60).padStart(2, "0")}m`
+    : `${v} min`;
+};
+// Gewerkte tijd minus de ingeroosterde pauze(s) die binnen de dienst vallen
+const dbWorked = (clock, planned) => {
+  if (!clock?.in) return null;
+  const start = new Date(clock.in);
+  const end = clock.out ? new Date(clock.out) : new Date();
+  const total = Math.max(0, (end - start) / 60000);
+  const s0 = start.getHours() * 60 + start.getMinutes();
+  const e0 = s0 + total;
+  let pauze = 0;
+  const pauzes = [];
+  for (const b of planned?.breaks || []) {
+    const bs = dbToMin(b?.start);
+    const be = dbToMin(b?.end);
+    if (bs == null || be == null || be <= bs) continue;
+    const ov = Math.max(0, Math.min(e0, be) - Math.max(s0, bs));
+    if (ov > 0) {
+      pauze += ov;
+      pauzes.push(`${b.start}–${b.end}`);
+    }
+  }
+  return { min: Math.max(0, total - pauze), pauze, pauzes };
 };
 const DB_TOLERANTIE = 5;
 // Afdeling waarop iemand die dag ingeroosterd staat (null = onbekend)
@@ -59276,16 +59320,16 @@ const DagbordView = ({
     const ps = dbToMin(pl?.start);
     const pe = dbToMin(pl?.end);
     const nowMin = new Date().getHours() * 60 + new Date().getMinutes();
-    const late = ai != null && ps != null && ai > ps + DB_TOLERANTIE;
-    const early = ao != null && pe != null && ao < pe - DB_TOLERANTIE;
+    const lateMin = ai != null && ps != null ? ai - ps : 0;
+    const earlyMin = ao != null && pe != null ? pe - ao : 0;
+    const late = lateMin > DB_TOLERANTIE;
+    const early = earlyMin > DB_TOLERANTIE;
     const missing =
       !c.in && ps != null && (isPastDay || (isToday && nowMin > ps + DB_TOLERANTIE));
     const notOut =
       c.in && !c.out && pe != null && (isPastDay || (isToday && nowMin > pe + 30));
-    const dur = c.in
-      ? (c.out ? new Date(c.out) : isToday ? new Date() : null) - new Date(c.in)
-      : null;
-    return { c, pl, late, early, missing, notOut, dur };
+    const worked = c.in && (c.out || isToday) ? dbWorked(c, pl) : null;
+    return { c, pl, late, early, lateMin, earlyMin, missing, notOut, worked };
   };
   const saveClockEdit = () => {
     if (!editClock) return;
@@ -59646,8 +59690,27 @@ const DagbordView = ({
                   Aan het werk sinds {dbHM(myClock.in)}
                 </p>
                 <p className="text-xs text-gray-500">
-                  {dbDur(Date.now() - new Date(myClock.in))}
-                  {myPlanned?.end ? ` · gepland tot ${myPlanned.end}` : ""}
+                  {(() => {
+                    const w = dbWorked(myClock, myPlanned);
+                    const ps = dbToMin(myPlanned?.start);
+                    const ai = dbIsoMin(myClock.in);
+                    const late = ps != null && ai != null ? ai - ps : 0;
+                    return (
+                      <>
+                        {dbMinLabel(w?.min || 0)} gewerkt
+                        {w?.pauze ? ` (excl. ${dbMinLabel(w.pauze)} pauze)` : ""}
+                        {myPlanned?.end ? ` · gepland tot ${myPlanned.end}` : ""}
+                        {myPlanned?.breaks?.length
+                          ? ` · pauze ${myPlanned.breaks.map((b) => `${b.start}–${b.end}`).join(", ")}`
+                          : ""}
+                        {late > DB_TOLERANTIE && (
+                          <span className="font-semibold" style={{ color: "#B91C1C" }}>
+                            {" "}· {dbMinLabel(late)} na geplande start
+                          </span>
+                        )}
+                      </>
+                    );
+                  })()}
                 </p>
               </>
             ) : (
@@ -59657,7 +59720,10 @@ const DagbordView = ({
                 </p>
                 <p className="text-xs text-gray-500">
                   {dbHM(myClock.in)}–{dbHM(myClock.out)} ·{" "}
-                  {dbDur(new Date(myClock.out) - new Date(myClock.in))}
+                  {dbMinLabel(dbWorked(myClock, myPlanned)?.min || 0)} gewerkt
+                  {dbWorked(myClock, myPlanned)?.pauze
+                    ? ` (excl. ${dbMinLabel(dbWorked(myClock, myPlanned).pauze)} pauze)`
+                    : ""}
                 </p>
               </>
             )}
@@ -60166,8 +60232,11 @@ const DagbordView = ({
                 <>
                   {myClock.in && myClock.out && (
                     <p className="text-sm text-center" style={{ color: C.Pine }}>
-                      Gewerkt {dbHM(myClock.in)}–{dbHM(myClock.out)} (
-                      {dbDur(new Date(myClock.out) - new Date(myClock.in))})
+                      Gewerkt {dbHM(myClock.in)}–{dbHM(myClock.out)} ·{" "}
+                      {dbMinLabel(dbWorked(myClock, myPlanned)?.min || 0)}
+                      {dbWorked(myClock, myPlanned)?.pauze
+                        ? ` (excl. ${dbMinLabel(dbWorked(myClock, myPlanned).pauze)} pauze)`
+                        : ""}
                     </p>
                   )}
                   {myDeviation && !alreadyCorrected && !corrSent && (
@@ -60482,13 +60551,32 @@ const DagbordView = ({
                                   ? "niet gestart"
                                   : r.notOut
                                   ? "niet afgesloten"
-                                  : r.dur != null
-                                  ? dbDur(r.dur)
+                                  : r.worked
+                                  ? `${dbMinLabel(r.worked.min)} gewerkt${
+                                      r.worked.pauze ? ` (excl. ${dbMinLabel(r.worked.pauze)} pauze)` : ""
+                                    }`
                                   : ""}
-                                {r.late && " · te laat"}
-                                {r.early && " · eerder weg"}
-                                {r.c.correctedBy && " · aangepast"}
                               </p>
+                              {(r.late || r.early || r.c.correctedBy) && (
+                                <p className="text-[11px] font-semibold">
+                                  {r.late && (
+                                    <span style={{ color: "#B91C1C" }}>
+                                      {dbMinLabel(r.lateMin)} te laat
+                                    </span>
+                                  )}
+                                  {r.late && r.early && <span className="text-gray-300"> · </span>}
+                                  {r.early && (
+                                    <span style={{ color: "#B45309" }}>
+                                      {dbMinLabel(r.earlyMin)} eerder weg
+                                    </span>
+                                  )}
+                                  {r.c.correctedBy && (
+                                    <span className="text-gray-400 font-normal">
+                                      {r.late || r.early ? " · " : ""}aangepast door {r.c.correctedBy}
+                                    </span>
+                                  )}
+                                </p>
+                              )}
                             </button>
                           )}
                         </div>
