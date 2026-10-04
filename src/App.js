@@ -59737,8 +59737,38 @@ const DagbordView = ({
 
   return (
     <div className="space-y-4">
+      {/* Vrij vandaag (niet ingeroosterd, niet gestart; FM werkt vaak buiten het rooster) */}
+      {isToday && !myClock.in && !myPlanned && !isFM && (
+        <div
+          className="rounded-2xl px-4 py-3 flex items-center gap-3 flex-wrap"
+          style={{ backgroundColor: C.GrassLight, border: `1px solid ${C.Grass}` }}
+        >
+          <div
+            className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
+            style={{ backgroundColor: "white" }}
+          >
+            <Sun size={20} style={{ color: C.Pine }} />
+          </div>
+          <div className="flex-1 min-w-[180px]">
+            <p className="text-sm font-bold" style={{ color: C.Pine }}>
+              Je bent vandaag vrij 🌿
+            </p>
+            <p className="text-xs text-gray-600">
+              Geniet ervan! Je kunt hier gewoon meelezen wat er speelt.
+            </p>
+          </div>
+          <button
+            onClick={startShift}
+            className="text-xs font-semibold underline"
+            style={{ color: C.Pine }}
+          >
+            Toch aan het werk? Dienst starten
+          </button>
+        </div>
+      )}
+
       {/* Dienst starten / afsluiten */}
-      {isToday && (
+      {isToday && (myClock.in || myPlanned || isFM) && (
         <div
           className="rounded-2xl px-4 py-3 flex items-center gap-3 flex-wrap"
           style={{
