@@ -40,6 +40,56 @@ const registerOrderRemoval = (id) => {
   if (id != null) orderRemovalIntent.add(id);
 };
 
+// ✅ TAKEN VEILIG AFVINKEN — 'checklists' werd als hele array opgeslagen
+// ("laatste schrijver wint"). Vinkte een collega tegelijk een andere taak af,
+// dan verdween diens vinkje bij jouw save. Nu wordt per save bepaald welke
+// taken JIJ echt gewijzigd hebt (diff t.o.v. de huidige lokale stand) en
+// worden alleen die op de server-versie toegepast. Sleutel = id + datum.
+const checklistPatches = new Map(); // sleutel → item (of null = verwijderd)
+const clKey = (c) =>
+  c && c.id != null ? `${c.id}|${c.date == null ? "" : c.date}` : null;
+const registerChecklistDiff = (oldArr, newArr) => {
+  const oldMap = new Map();
+  (Array.isArray(oldArr) ? oldArr : []).forEach((c) => {
+    const k = clKey(c);
+    if (k) oldMap.set(k, c);
+  });
+  const newMap = new Map();
+  (Array.isArray(newArr) ? newArr : []).forEach((c) => {
+    const k = clKey(c);
+    if (k) newMap.set(k, c);
+  });
+  for (const [k, c] of newMap) {
+    const o = oldMap.get(k);
+    if (!o || (o !== c && JSON.stringify(o) !== JSON.stringify(c)))
+      checklistPatches.set(k, c);
+  }
+  for (const k of oldMap.keys()) {
+    if (!newMap.has(k)) checklistPatches.set(k, null);
+  }
+};
+const applyChecklistPatches = (arr) => {
+  const base = Array.isArray(arr) ? arr : [];
+  if (checklistPatches.size === 0) return base;
+  const out = [];
+  const seen = new Set();
+  for (const c of base) {
+    const k = clKey(c);
+    if (k && checklistPatches.has(k)) {
+      if (seen.has(k)) continue;
+      seen.add(k);
+      const pch = checklistPatches.get(k);
+      if (pch) out.push(pch);
+    } else {
+      out.push(c);
+    }
+  }
+  for (const [k, pch] of checklistPatches) {
+    if (!seen.has(k) && pch) out.push(pch);
+  }
+  return out;
+};
+
 // 🔗 Velden die op medewerkersNAAM gekeyed zijn. Bij een typefout in de naam
 // ("Guilia" i.p.v. "Giulia", of een spatie erachter) raakt de data hier
 // onbereikbaar; de samenvoeg-functie in Instellingen hangt hem weer om.
@@ -58217,6 +58267,43 @@ const DbPill = ({ children, bg, text }) => (
   </span>
 );
 
+// Leesbevestiging: knop "Gelezen" + wie het al gezien heeft
+const DbReceipt = ({ reads, author, me, staffList, onRead, small = false }) => {
+  const names = Object.values(reads || {})
+    .filter((r) => r && r.name)
+    .map((r) => r.name);
+  const iRead = author === me || names.includes(me);
+  return (
+    <div className="flex items-center gap-2 flex-wrap mt-1.5">
+      {!iRead && onRead && (
+        <button
+          onClick={onRead}
+          className={`rounded-lg font-semibold text-white flex items-center gap-1 ${
+            small ? "px-2 py-1 text-[11px]" : "px-3 py-1.5 text-xs"
+          }`}
+          style={{ backgroundColor: C.Pine }}
+        >
+          <Eye size={small ? 11 : 13} /> Gelezen
+        </button>
+      )}
+      {names.length > 0 && (
+        <div className="flex -space-x-1.5">
+          {names.slice(0, 8).map((n) => (
+            <div key={n} className="rounded-full ring-2 ring-white" title={n}>
+              <ProfileAvatar name={n} staffList={staffList} size={small ? 18 : 22} />
+            </div>
+          ))}
+        </div>
+      )}
+      <span className="text-[11px] text-gray-500">
+        {names.length === 0
+          ? "Nog door niemand gezien"
+          : `Gezien door ${names.length}${names.length <= 3 ? `: ${names.join(", ")}` : ""}`}
+      </span>
+    </div>
+  );
+};
+
 // Reactie-draad (gebruikt bij activiteiten, gesprek van de dag en open punten)
 const DbThread = ({
   items,
@@ -58224,16 +58311,19 @@ const DbThread = ({
   loggedInUserName,
   onSend,
   onDelete,
+  onRead,
   placeholder = "Schrijf een reactie… (@naam om te taggen)",
   emptyText,
   compact = false,
 }) => {
   const [text, setText] = useState("");
+  const [important, setImportant] = useState(false);
   const send = () => {
     const t = text.trim();
     if (!t) return;
-    onSend(t);
+    onSend(t, important);
     setText("");
+    setImportant(false);
   };
   return (
     <div className="space-y-2">
@@ -58241,7 +58331,11 @@ const DbThread = ({
         <p className="text-xs text-gray-400 italic">{emptyText}</p>
       )}
       {items.map((m) => (
-        <div key={m.id} className="flex gap-2 group">
+        <div
+          key={m.id}
+          className={`flex gap-2 group ${m.important ? "rounded-xl p-2 -mx-1" : ""}`}
+          style={m.important ? { backgroundColor: "#FEF3C7" } : undefined}
+        >
           <ProfileAvatar
             name={m.author}
             staffList={staffList}
@@ -58252,6 +58346,11 @@ const DbThread = ({
               <span className="text-xs font-semibold" style={{ color: C.Lagoon }}>
                 {m.author}
               </span>
+              {m.important && (
+                <span className="text-[10px] font-bold uppercase tracking-wide" style={{ color: "#B45309" }}>
+                  Belangrijk
+                </span>
+              )}
               <span className="text-[11px] text-gray-400">{dbAgo(m.at)}</span>
               {onDelete && m.author === loggedInUserName && (
                 <button
@@ -58266,6 +58365,16 @@ const DbThread = ({
             <p className="text-sm text-gray-700 whitespace-pre-wrap break-words">
               {highlightMentions(m.text, loggedInUserName)}
             </p>
+            {m.important && (
+              <DbReceipt
+                small
+                reads={m.reads}
+                author={m.author}
+                me={loggedInUserName}
+                staffList={staffList}
+                onRead={onRead ? () => onRead(m) : null}
+              />
+            )}
           </div>
         </div>
       ))}
@@ -58286,6 +58395,19 @@ const DbThread = ({
             loggedInUserName={loggedInUserName}
           />
         </div>
+        <button
+          onClick={() => setImportant((v) => !v)}
+          className="h-9 px-2.5 rounded-xl flex items-center justify-center flex-shrink-0 text-xs font-semibold border transition-colors"
+          style={
+            important
+              ? { backgroundColor: "#FEF3C7", color: "#B45309", borderColor: "#F59E0B" }
+              : { backgroundColor: "white", color: "#9CA3AF", borderColor: "#E5E7EB" }
+          }
+          title="Markeer als belangrijk: iedereen ziet het en bevestigt dat ze het gelezen hebben"
+        >
+          <AlertTriangle size={14} />
+          <span className="hidden sm:inline ml-1">Belangrijk</span>
+        </button>
         <button
           onClick={send}
           className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 transition-opacity"
@@ -58505,6 +58627,7 @@ const DbPuntItem = ({
   onReopen,
   onAssign,
   onDelete,
+  onReadReactie,
 }) => {
   const [open, setOpen] = useState(false);
   const af = dbAfdeling(punt.afdeling);
@@ -58572,6 +58695,7 @@ const DbPuntItem = ({
             staffList={staffList}
             loggedInUserName={loggedInUserName}
             onSend={onReact}
+            onRead={onReadReactie}
             placeholder="Reageer of geef een update…"
           />
           <div className="flex flex-wrap gap-2 items-center">
@@ -58660,6 +58784,13 @@ const getDagbordAttention = (appData, loggedInUserName) => {
     if (p && !p.deleted && p.status !== "opgelost" && p.assignee === loggedInUserName)
       n++;
   }
+  const slug = dbSlug(loggedInUserName);
+  for (const [k, v] of Object.entries(day)) {
+    if (!v || v.deleted || v.author === loggedInUserName) continue;
+    // Doorgegeven door de vorige dienst + belangrijke berichten: nog niet gezien
+    if ((k.startsWith("door_") || (k.startsWith("c_") && v.important)) && !v.reads?.[slug])
+      n++;
+  }
   return n;
 };
 
@@ -58705,6 +58836,10 @@ const DagbordView = ({
   const [showExtraDone, setShowExtraDone] = useState(false);
   const [showLegacy, setShowLegacy] = useState(false);
   const [newPunt, setNewPunt] = useState(null); // { title, afdeling, assignee, note }
+  const [showClose, setShowClose] = useState(false); // "Dienst afsluiten"-venster
+  const [closeHidden, setCloseHidden] = useState(false); // herinnering weggeklikt
+  const [doorText, setDoorText] = useState("");
+  const [doorAsPunt, setDoorAsPunt] = useState(false);
 
   useEffect(() => {
     setOpenAct(null);
@@ -58818,6 +58953,7 @@ const DagbordView = ({
     { type: "entertainment", afd: "entertainment" },
     { type: "crea", afd: "crea" },
     { type: "hotspot", afd: "hotspot" },
+    { type: "springkussen", afd: "springkussen" },
   ];
   const allTasks = TASK_TYPES.flatMap(({ type, afd }) =>
     (getDailyTasks ? getDailyTasks(type) : []).map((t) => ({ ...t, _afd: afd }))
@@ -58888,15 +59024,100 @@ const DagbordView = ({
   const markRead = () =>
     save({ [`read_${dbSlug(me)}`]: { name: me, at: Date.now() } });
 
-  const addComment = (target, text, label) => {
+  const myRead = () => ({ [dbSlug(me)]: { name: me, at: Date.now() } });
+  const addComment = (target, text, label, important = false) => {
     const id = dbNewId();
     save(
-      { [`c_${id}`]: { id, target, author: me, text, at: Date.now() } },
+      {
+        [`c_${id}`]: {
+          id,
+          target,
+          author: me,
+          text,
+          at: Date.now(),
+          important: !!important,
+        },
+      },
       null,
       mentionNotifs(text, label)
     );
   };
   const deleteComment = (c) => save({ [`c_${c.id}`]: { deleted: true } });
+  const readComment = (c) => save({ [`c_${c.id}`]: { reads: myRead() } });
+
+  // ── Doorgeven aan de volgende dag ──────────────────────────────────
+  const nextDate = new Date(currentDay);
+  nextDate.setDate(nextDate.getDate() + 1);
+  const nextKey = toIsoDate(nextDate);
+  const prevDate = new Date(currentDay);
+  prevDate.setDate(prevDate.getDate() - 1);
+  const dagNaam = (d) =>
+    d.toLocaleDateString("nl-NL", { weekday: "long", day: "numeric", month: "short" });
+  const incoming = Object.entries(day)
+    .filter(([k, v]) => k.startsWith("door_") && v && !v.deleted)
+    .map(([, v]) => v)
+    .sort((a, b) => (a.at || 0) - (b.at || 0));
+  const outgoing = Object.entries(appData.dagbord?.[nextKey] || {})
+    .filter(([k, v]) => k.startsWith("door_") && v && !v.deleted && v.author === me)
+    .map(([, v]) => v);
+  const sendDoorgeven = () => {
+    const text = doorText.trim();
+    if (!text) return;
+    const id = dbNewId();
+    const now = Date.now();
+    const updates = {
+      dagbord: {
+        [nextKey]: {
+          [`door_${id}`]: { id, author: me, text, fromDate: dateKey, at: now },
+        },
+      },
+    };
+    if (doorAsPunt) {
+      const pid = dbNewId();
+      updates.openPunten = {
+        [pid]: {
+          id: pid,
+          title: text.length > 90 ? text.slice(0, 87) + "…" : text,
+          afdeling: afdeling,
+          author: me,
+          createdAt: now,
+          assignee: "",
+          status: "open",
+          reacties:
+            text.length > 90 ? { [dbNewId()]: { author: me, text, at: now } } : {},
+        },
+      };
+    }
+    const notifs = mentionNotifs(text, "Doorgegeven voor morgen");
+    if (notifs.length > 0)
+      updates.notifications = [...(appData.notifications || []), ...notifs];
+    updateData(updates);
+    setDoorText("");
+    setDoorAsPunt(false);
+    cpToast("Doorgegeven aan de volgende dag", "success");
+  };
+  const readDoor = (d) => save({ [`door_${d.id}`]: { reads: myRead() } });
+  const deleteDoorFrom = (d, key) =>
+    updateData({ dagbord: { [key]: { [`door_${d.id}`]: { deleted: true } } } });
+
+  // Mijn dienst vandaag (voor de afsluit-herinnering)
+  const myShiftEnd = (() => {
+    const rd = (appData.roosterDiensten?.[dateKey] || []).find((d) =>
+      (d.assigned || []).includes(me)
+    );
+    if (rd?.end) return rd.end;
+    const ws = (appData.workSchedule?.[dateKey] || []).find(
+      (x) => x.matchedUser === me || x.name === me
+    );
+    return ws?.end || null;
+  })();
+  const shiftAlmostDone = (() => {
+    if (!isToday || !myShiftEnd) return false;
+    const [h, m] = String(myShiftEnd).split(":").map(Number);
+    if (isNaN(h)) return false;
+    const now = new Date();
+    return now.getHours() * 60 + now.getMinutes() >= h * 60 + (m || 0) - 30;
+  })();
 
   const saveReport = (act, f) => {
     const key = `rep_${dbSlug(act.id)}_${dbSlug(me)}`;
@@ -58961,10 +59182,22 @@ const DagbordView = ({
     );
     setNewPunt(null);
   };
-  const reactPunt = (p, text) => {
+  const reactPunt = (p, text, important = false) => {
     const rid = dbNewId();
-    save(null, { [p.id]: { reacties: { [rid]: { author: me, text, at: Date.now() } } } }, mentionNotifs(text, `Open punt: ${p.title}`));
+    save(
+      null,
+      {
+        [p.id]: {
+          reacties: {
+            [rid]: { author: me, text, at: Date.now(), important: !!important },
+          },
+        },
+      },
+      mentionNotifs(text, `Open punt: ${p.title}`)
+    );
   };
+  const readReactie = (p, r) =>
+    save(null, { [p.id]: { reacties: { [r.id]: { reads: myRead() } } } });
   const resolvePunt = (p) =>
     save(null, { [p.id]: { status: "opgelost", resolvedBy: me, resolvedAt: Date.now() } });
   const reopenPunt = (p) =>
@@ -59162,7 +59395,8 @@ const DagbordView = ({
                   items={thread}
                   staffList={staffList}
                   loggedInUserName={me}
-                  onSend={(t) => addComment(`act:${id}`, t, act.title)}
+                  onSend={(t, imp) => addComment(`act:${id}`, t, act.title, imp)}
+                  onRead={readComment}
                   onDelete={deleteComment}
                   placeholder="Vraag of opmerking over deze activiteit…"
                 />
@@ -59176,8 +59410,46 @@ const DagbordView = ({
 
   const hasAnything = visibleActs.length + allTasks.length > 0;
 
+  // Afsluit-overzicht: wat staat er nog open voor mij
+  const myOpenActs = activities.filter((a) => {
+    if (!(a.staff || []).includes(me)) return false;
+    if (!(isPastDay || (isToday && isActivityPast(a.time, currentDay)))) return false;
+    const r = reportsFor(a.id);
+    return r.nieuw.length + r.oud.length === 0;
+  });
+  const openDayTasks = allTasks.filter((t) => !t.done && !t.nvt);
+  const myPunten = openPunten.filter((p) => p.assignee === me);
+
   return (
     <div className="space-y-4">
+      {/* Herinnering: dienst zit er (bijna) op */}
+      {shiftAlmostDone && outgoing.length === 0 && !closeHidden && !showClose && (
+        <div
+          className="rounded-2xl px-4 py-3 flex items-center gap-3 flex-wrap"
+          style={{ backgroundColor: C.HoneyLight, border: `1px solid ${C.Honey}` }}
+        >
+          <Moon size={18} style={{ color: C.Bark }} />
+          <p className="text-sm flex-1 min-w-[200px]" style={{ color: C.Bark }}>
+            Je dienst zit er bijna op ({myShiftEnd}). Sluit af en geef door wat de
+            volgende dienst moet weten.
+          </p>
+          <button
+            onClick={() => setShowClose(true)}
+            className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white"
+            style={{ backgroundColor: C.Bark }}
+          >
+            Dienst afsluiten
+          </button>
+          <button
+            onClick={() => setCloseHidden(true)}
+            className="text-xs"
+            style={{ color: C.Bark }}
+          >
+            Later
+          </button>
+        </div>
+      )}
+
       {/* Samenvatting + afdelingsfilter */}
       <div className="flex flex-wrap items-center gap-2 justify-between">
         <div className="flex flex-wrap gap-1.5">
@@ -59222,6 +59494,16 @@ const DagbordView = ({
             <DbPill bg="#FEF3C7" text="#92400E">
               {openPunten.length} open {openPunten.length === 1 ? "punt" : "punten"}
             </DbPill>
+          )}
+          {(isToday || isPastDay) && (
+            <button
+              onClick={() => setShowClose(true)}
+              className="text-[11px] font-semibold px-2.5 py-1 rounded-full flex items-center gap-1"
+              style={{ backgroundColor: C.Bark, color: "white" }}
+            >
+              <Moon size={11} /> Dienst afsluiten
+              {outgoing.length > 0 && ` · ${outgoing.length} doorgegeven`}
+            </button>
           )}
         </div>
       </div>
@@ -59331,6 +59613,186 @@ const DagbordView = ({
           </div>
         </div>
       </div>
+
+      {/* Doorgegeven door de vorige dienst */}
+      {incoming.length > 0 && (
+        <div
+          className="rounded-2xl border overflow-hidden bg-white"
+          style={{ borderColor: `${C.Honey}` }}
+        >
+          <div
+            className="px-4 py-2.5 flex items-center gap-2"
+            style={{ backgroundColor: C.HoneyLight }}
+          >
+            <History size={16} style={{ color: C.Bark }} />
+            <p className="text-sm font-bold" style={{ color: C.Bark }}>
+              Doorgegeven door de vorige dienst
+            </p>
+            <span className="text-[11px]" style={{ color: C.Bark }}>
+              {dagNaam(prevDate)}
+            </span>
+          </div>
+          <div className="px-4 py-2 divide-y divide-gray-100">
+            {incoming.map((d) => (
+              <div key={d.id} className="py-2.5 flex gap-2.5">
+                <ProfileAvatar name={d.author} staffList={staffList} size={26} />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-xs font-semibold" style={{ color: C.Lagoon }}>
+                      {d.author}
+                    </span>
+                    <span className="text-[11px] text-gray-400">{dbAgo(d.at)}</span>
+                    {d.author === me && (
+                      <button
+                        onClick={() => deleteDoorFrom(d, dateKey)}
+                        className="ml-auto text-gray-300 hover:text-red-500"
+                        title="Verwijderen"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    )}
+                  </div>
+                  <p className="text-sm text-gray-800 whitespace-pre-wrap">
+                    {highlightMentions(d.text, me)}
+                  </p>
+                  <DbReceipt
+                    reads={d.reads}
+                    author={d.author}
+                    me={me}
+                    staffList={staffList}
+                    onRead={() => readDoor(d)}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Dienst afsluiten */}
+      {showClose && (
+        <div
+          className="fixed inset-0 z-[80] flex items-end sm:items-center justify-center p-0 sm:p-4"
+          style={{ background: "rgba(0,0,0,0.45)" }}
+          onClick={() => setShowClose(false)}
+        >
+          <div
+            className="bg-white w-full sm:max-w-lg rounded-t-2xl sm:rounded-2xl max-h-[90vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 border-b border-gray-100 flex items-center gap-2">
+              <Moon size={18} style={{ color: C.Pine }} />
+              <h3 className="text-base font-bold flex-1" style={{ color: C.Lagoon }}>
+                Dienst afsluiten
+              </h3>
+              <button onClick={() => setShowClose(false)} className="text-gray-400">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="px-5 py-4 space-y-4">
+              {myOpenActs.length > 0 && (
+                <div>
+                  <p className="text-xs font-bold mb-1.5" style={{ color: "#991B1B" }}>
+                    Nog geen verslag van jouw activiteiten
+                  </p>
+                  {myOpenActs.map((a) => (
+                    <div key={a.id} className="flex items-center gap-2 py-1">
+                      <span className="text-xs text-gray-400 w-10">
+                        {(a.time || "").split("-")[0].trim()}
+                      </span>
+                      <span className="text-sm flex-1">{a.title}</span>
+                      <button
+                        onClick={() => {
+                          setShowClose(false);
+                          setOpenAct(String(a.id));
+                          setEditingRep(String(a.id));
+                        }}
+                        className="text-xs font-semibold px-2.5 py-1 rounded-lg"
+                        style={{ backgroundColor: `${C.Pine}12`, color: C.Pine }}
+                      >
+                        Verslag schrijven
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {openDayTasks.length > 0 && (
+                <div>
+                  <p className="text-xs font-bold mb-1" style={{ color: C.Lagoon }}>
+                    Taken die nog openstaan ({openDayTasks.length})
+                  </p>
+                  {openDayTasks.slice(0, 10).map((t) => renderTask(t))}
+                  {openDayTasks.length > 10 && (
+                    <p className="text-[11px] text-gray-400">
+                      + {openDayTasks.length - 10} meer in de dagplanning
+                    </p>
+                  )}
+                </div>
+              )}
+              {myPunten.length > 0 && (
+                <p className="text-xs font-semibold" style={{ color: "#B45309" }}>
+                  {myPunten.length} open {myPunten.length === 1 ? "punt staat" : "punten staan"} op jouw naam.
+                </p>
+              )}
+              {myOpenActs.length === 0 && openDayTasks.length === 0 && (
+                <p className="text-sm" style={{ color: C.Pine }}>
+                  Alles is af en je verslagen staan erin.
+                </p>
+              )}
+              <div className="rounded-xl p-3 space-y-2" style={{ backgroundColor: C.HoneyLight }}>
+                <p className="text-sm font-semibold" style={{ color: C.Bark }}>
+                  Moet de volgende dienst iets weten?
+                </p>
+                <p className="text-[11px]" style={{ color: C.Bark }}>
+                  Verschijnt op {dagNaam(nextDate)} bovenaan het dagbord, met leesbevestiging.
+                </p>
+                {outgoing.map((d) => (
+                  <div key={d.id} className="flex gap-2 items-start bg-white rounded-lg px-2.5 py-1.5">
+                    <p className="text-xs text-gray-700 flex-1 whitespace-pre-wrap">{d.text}</p>
+                    <button
+                      onClick={() => deleteDoorFrom(d, nextKey)}
+                      className="text-gray-300 hover:text-red-500"
+                      title="Verwijderen"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                ))}
+                <MentionTextarea
+                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#0A7B6A] resize-none bg-white h-20"
+                  placeholder="Bv. kist met prijzen staat in de berging, nog 2 bandjes over, @Emma bel even de receptie…"
+                  value={doorText}
+                  onChange={(e) => setDoorText(e.target.value)}
+                  staffList={staffList}
+                  loggedInUserName={me}
+                />
+                <label className="flex items-center gap-2 text-xs" style={{ color: C.Bark }}>
+                  <input
+                    type="checkbox"
+                    checked={doorAsPunt}
+                    onChange={(e) => setDoorAsPunt(e.target.checked)}
+                  />
+                  Ook als open punt (blijft staan tot iemand het oplost)
+                </label>
+                <button
+                  onClick={sendDoorgeven}
+                  className="w-full py-2 rounded-xl text-sm font-semibold text-white"
+                  style={{ backgroundColor: C.Bark, opacity: doorText.trim() ? 1 : 0.5 }}
+                >
+                  Doorgeven aan {dagNaam(nextDate)}
+                </button>
+              </div>
+              <button
+                onClick={() => setShowClose(false)}
+                className="w-full py-2.5 rounded-xl text-sm font-semibold"
+                style={{ backgroundColor: C.Pine, color: "white" }}
+              >
+                Klaar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)] gap-4 items-start">
         {/* Tijdlijn */}
@@ -59480,7 +59942,7 @@ const DagbordView = ({
                 staffList={staffList}
                 loggedInUserName={me}
                 userRole={userRole}
-                onReact={(t) => reactPunt(p, t)}
+                onReact={(t, imp) => reactPunt(p, t, imp)} onReadReactie={(r) => readReactie(p, r)}
                 onResolve={() => resolvePunt(p)}
                 onReopen={() => reopenPunt(p)}
                 onAssign={(n) => assignPunt(p, n)}
@@ -59504,7 +59966,7 @@ const DagbordView = ({
                       staffList={staffList}
                       loggedInUserName={me}
                       userRole={userRole}
-                      onReact={(t) => reactPunt(p, t)}
+                      onReact={(t, imp) => reactPunt(p, t, imp)} onReadReactie={(r) => readReactie(p, r)}
                       onResolve={() => resolvePunt(p)}
                       onReopen={() => reopenPunt(p)}
                       onAssign={(n) => assignPunt(p, n)}
@@ -59525,7 +59987,8 @@ const DagbordView = ({
               items={commentsFor("day")}
               staffList={staffList}
               loggedInUserName={me}
-              onSend={(t) => addComment("day", t, "Gesprek van de dag")}
+              onSend={(t, imp) => addComment("day", t, "Gesprek van de dag", imp)}
+              onRead={readComment}
               onDelete={deleteComment}
               emptyText="Nog niets gedeeld vandaag."
               placeholder="Deel iets met het team… (@naam of @team)"
@@ -61547,6 +62010,11 @@ function AppInner() {
         localStorage.setItem("cp_loginTime", new Date().toISOString());
       }
 
+      // ✅ Taken: onthoud alleen wat deze save echt wijzigt (zie checklistPatches)
+      if (Array.isArray(newData.checklists)) {
+        registerChecklistDiff(appData.checklists, newData.checklists);
+      }
+
       // 🔒 STAP 1: Verzamel wijzigingen met DEEP MERGE (voor debouncing)
       // ✅ FIX: Voor objecten zoals workSchedule, merge de datums
       const updatedPending = { ...pendingChangesRef.current };
@@ -61621,6 +62089,13 @@ function AppInner() {
       for (const key of Object.keys(pendingChangesRef.current)) {
         const pendingVal = pendingChangesRef.current[key];
         const currentVal = appData[key];
+
+        if (key === "checklists") {
+          optimisticUpdate.checklists = applyChecklistPatches(
+            Array.isArray(currentVal) ? currentVal : pendingVal
+          );
+          continue;
+        }
 
         // Voor objecten (zoals workSchedule): deep merge
         if (
@@ -61698,6 +62173,7 @@ function AppInner() {
         }
 
         isSavingRef.current = true;
+        const checklistPatchSnap = new Map(checklistPatches);
         const changesToSave = { ...pendingChangesRef.current };
         pendingChangesRef.current = {}; // Reset pending changes
         activeSaveRef.current = changesToSave; // Bijhouden voor snapshot merge
@@ -61949,6 +62425,14 @@ function AppInner() {
               if (Object.prototype.hasOwnProperty.call(liveChanges, "orders")) {
                 orderRemovalIntent.clear();
               }
+              // Taak-wijzigingen die nu op de server staan zijn verwerkt
+              if (
+                Object.prototype.hasOwnProperty.call(liveChanges, "checklists")
+              ) {
+                for (const [k, v] of checklistPatchSnap) {
+                  if (checklistPatches.get(k) === v) checklistPatches.delete(k);
+                }
+              }
 
               // Verberg "synced" indicator na 1.5 seconden, maar laat "offline" staan
               setTimeout(() => {
@@ -62063,6 +62547,14 @@ function AppInner() {
     for (const key of Object.keys(localChanges)) {
       const serverVal = serverData[key];
       const localVal = localChanges[key];
+
+      if (key === "checklists") {
+        // ✅ Alleen eigen gewijzigde taken toepassen op de server-versie
+        result[key] = applyChecklistPatches(
+          Array.isArray(serverVal) ? serverVal : localVal
+        );
+        continue;
+      }
 
       if (key === "orders") {
         // 🔒 PER-ID MERGE (zelfde aanpak als staffList): "laatste schrijver
