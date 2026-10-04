@@ -58903,8 +58903,9 @@ const DagbordView = ({
 
   // Automatisch openen op de afdeling waar je vandaag op ingepland staat
   const ingeplandOp = dbMyAfdeling(appData, dateKey, me);
+  // Niet ingepland → alles tonen
   useEffect(() => {
-    if (ingeplandOp) setAfdeling(ingeplandOp);
+    setAfdeling(ingeplandOp || "alle");
   }, [dateKey, ingeplandOp]); // eslint-disable-line
 
   const [openAct, setOpenAct] = useState(null); // actId dat uitgeklapt is
