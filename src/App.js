@@ -40,54 +40,102 @@ const registerOrderRemoval = (id) => {
   if (id != null) orderRemovalIntent.add(id);
 };
 
-// ✅ TAKEN VEILIG AFVINKEN — 'checklists' werd als hele array opgeslagen
-// ("laatste schrijver wint"). Vinkte een collega tegelijk een andere taak af,
-// dan verdween diens vinkje bij jouw save. Nu wordt per save bepaald welke
-// taken JIJ echt gewijzigd hebt (diff t.o.v. de huidige lokale stand) en
-// worden alleen die op de server-versie toegepast. Sleutel = id + datum.
-const checklistPatches = new Map(); // sleutel → item (of null = verwijderd)
-const clKey = (c) =>
-  c && c.id != null ? `${c.id}|${c.date == null ? "" : c.date}` : null;
-const registerChecklistDiff = (oldArr, newArr) => {
+// ✅ PER-ITEM OPSLAAN — deze velden werden als geheel opgeslagen
+// ("laatste schrijver wint"). Werkten twee collega's tegelijk, dan verdween
+// het werk van de één bij de save van de ander: vinkjes (checklists),
+// @meldingen (notifications), urencorrecties en springkussen-checks.
+// Nu wordt per save bepaald welke items JIJ echt gewijzigd hebt (diff t.o.v.
+// de huidige lokale stand) en worden alleen die op de server-versie gezet.
+const idKey = (x) => (x && x.id != null ? String(x.id) : null);
+const PATCH_FIELDS = {
+  // sleutel = id + datum (zelfde taak-id komt op meerdere dagen voor)
+  checklists: {
+    key: (c) => (c && c.id != null ? `${c.id}|${c.date == null ? "" : c.date}` : null),
+  },
+  notifications: {
+    key: idKey,
+    // Twee collega's die dezelfde melding tegelijk lezen: beide "gelezen" bewaren
+    merge: (srv, mine) =>
+      Array.isArray(srv?.readBy) && Array.isArray(mine?.readBy)
+        ? { ...mine, readBy: [...new Set([...srv.readBy, ...mine.readBy])] }
+        : mine,
+  },
+  hourCorrections: { key: idKey },
+  // { "YYYY-MM-DD": [check] } → plat gemaakt naar items met __d (datum)
+  springkussenChecks: {
+    key: (c) => (c && c.id != null ? `${c.__d}|${c.id}` : null),
+    flatten: (obj) => {
+      const out = [];
+      for (const [d, arr] of Object.entries(isPlainObj(obj) ? obj : {})) {
+        if (Array.isArray(arr)) arr.forEach((c) => c && out.push({ ...c, __d: d }));
+      }
+      return out;
+    },
+    unflatten: (items, base) => {
+      const out = {};
+      // datums met een afwijkende (niet-array) waarde ongemoeid laten
+      for (const [d, v] of Object.entries(isPlainObj(base) ? base : {})) {
+        if (!Array.isArray(v)) out[d] = v;
+      }
+      for (const it of items) {
+        const { __d, ...c } = it;
+        if (!out[__d] || !Array.isArray(out[__d])) out[__d] = [];
+        out[__d].push(c);
+      }
+      return out;
+    },
+  },
+};
+const fieldPatches = {}; // veld → Map(sleutel → item | null)
+for (const f of Object.keys(PATCH_FIELDS)) fieldPatches[f] = new Map();
+const toItems = (field, val) => {
+  const cfg = PATCH_FIELDS[field];
+  if (cfg.flatten) return cfg.flatten(val);
+  return Array.isArray(val) ? val : [];
+};
+const registerFieldDiff = (field, oldVal, newVal) => {
+  const cfg = PATCH_FIELDS[field];
+  const patches = fieldPatches[field];
   const oldMap = new Map();
-  (Array.isArray(oldArr) ? oldArr : []).forEach((c) => {
-    const k = clKey(c);
+  toItems(field, oldVal).forEach((c) => {
+    const k = cfg.key(c);
     if (k) oldMap.set(k, c);
   });
   const newMap = new Map();
-  (Array.isArray(newArr) ? newArr : []).forEach((c) => {
-    const k = clKey(c);
+  toItems(field, newVal).forEach((c) => {
+    const k = cfg.key(c);
     if (k) newMap.set(k, c);
   });
   for (const [k, c] of newMap) {
     const o = oldMap.get(k);
-    if (!o || (o !== c && JSON.stringify(o) !== JSON.stringify(c)))
-      checklistPatches.set(k, c);
+    if (!o || (o !== c && JSON.stringify(o) !== JSON.stringify(c))) patches.set(k, c);
   }
   for (const k of oldMap.keys()) {
-    if (!newMap.has(k)) checklistPatches.set(k, null);
+    if (!newMap.has(k)) patches.set(k, null);
   }
 };
-const applyChecklistPatches = (arr) => {
-  const base = Array.isArray(arr) ? arr : [];
-  if (checklistPatches.size === 0) return base;
+const applyFieldPatches = (field, val) => {
+  const cfg = PATCH_FIELDS[field];
+  const patches = fieldPatches[field];
+  if (patches.size === 0) return cfg.flatten ? (isPlainObj(val) ? val : {}) : Array.isArray(val) ? val : [];
+  const base = toItems(field, val);
   const out = [];
   const seen = new Set();
   for (const c of base) {
-    const k = clKey(c);
-    if (k && checklistPatches.has(k)) {
+    const k = cfg.key(c);
+    if (k && patches.has(k)) {
       if (seen.has(k)) continue;
       seen.add(k);
-      const pch = checklistPatches.get(k);
-      if (pch) out.push(pch);
+      const pch = patches.get(k);
+      if (pch) out.push(cfg.merge ? cfg.merge(c, pch) : pch);
     } else {
       out.push(c);
     }
   }
-  for (const [k, pch] of checklistPatches) {
+  for (const [k, pch] of patches) {
     if (!seen.has(k) && pch) out.push(pch);
   }
-  return out;
+  return cfg.unflatten ? cfg.unflatten(out, val) : out;
 };
 
 // 🔗 Velden die op medewerkersNAAM gekeyed zijn. Bij een typefout in de naam
@@ -5376,72 +5424,7 @@ const HandoverSection = ({
     >
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4 min-h-[400px]">
-        {!fmOnly || userRole === "fm" ? (
-          <>
-            {editingEntry ? (
-              <HandoverEntryForm
-                type={type}
-                initialData={editingEntry}
-                onSubmit={handleUpdateEntry}
-                onCancel={() => setEditingEntry(null)}
-                loggedInUserName={loggedInUserName}
-                staffList={staffList}
-                dayActivities={dayActivities}
-              />
-            ) : (
-              <>
-                <HandoverEntryForm
-                  type={type}
-                  onSubmit={(newEntry) => {
-                    if (
-                      newEntry.actFields &&
-                      Object.keys(newEntry.actFields).length > 0
-                    ) {
-                      // Activiteit-save: samenvoegen in bestaande report-entry van dezelfde auteur
-                      const existingIdx = logs.findIndex(
-                        (l) => l.actFields && l.author === newEntry.author
-                      );
-                      if (existingIdx >= 0) {
-                        const existing = logs[existingIdx];
-                        const updated = [...logs];
-                        updated[existingIdx] = {
-                          ...existing,
-                          actFields: {
-                            ...(existing.actFields || {}),
-                            ...(newEntry.actFields || {}),
-                          },
-                          colleagues:
-                            newEntry.colleagues || existing.colleagues || "",
-                          readBy: [],
-                          timestamp: newEntry.timestamp,
-                          time: newEntry.time,
-                        };
-                        onUpdate(updated);
-                      } else {
-                        onUpdate([...logs, newEntry]);
-                      }
-                    } else {
-                      onUpdate([...logs, newEntry]);
-                    }
-                  }}
-                  loggedInUserName={loggedInUserName}
-                  staffList={staffList}
-                  dayActivities={dayActivities}
-                />
-              </>
-            )}
-          </>
-        ) : (
-          <div className="text-center text-sm p-4 bg-gray-50 rounded-lg border border-gray-200">
-            <Lock size={20} className="mx-auto mb-2 text-gray-400" />
-            <p className="text-gray-600 font-medium">
-              Alleen FM kan mededelingen toevoegen
-            </p>
-            <p className="text-xs text-gray-500 mt-1">
-              Je kunt hier wel mededelingen van FM lezen
-            </p>
-          </div>
-        )}
+        {/* 📦 Archief: nieuwe overdrachten schrijf je in het Dagbord */}
         {logs.length === 0 && (
           <div className="text-center text-xs italic mt-10 opacity-50">
             Nog geen {fmOnly ? "mededelingen" : "overdrachten"} voor deze dag.
@@ -5964,14 +5947,6 @@ const HandoverSection = ({
 
                   {/* Edit / Delete knoppen (hover) */}
                   <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    {isAuthor && (
-                      <button
-                        onClick={() => handleEditEntry(entry)}
-                        className="text-gray-300 hover:text-gray-500"
-                      >
-                        <Edit2 size={14} />
-                      </button>
-                    )}
                     {(userRole === "fm" || userRole === "co") && (
                       <button
                         onClick={() => handleDelete(msgId)}
@@ -25574,6 +25549,26 @@ const HandoverView = ({
 
   return (
     <div className="space-y-3 animate-in fade-in h-full overflow-y-auto pb-20 w-full max-w-7xl mx-auto">
+      {/* 📦 Archief-melding */}
+      <div
+        className="rounded-2xl px-4 py-3 flex items-center gap-3 flex-wrap"
+        style={{ backgroundColor: C.PineLight, border: `1px solid ${C.Pine}30` }}
+      >
+        <History size={18} style={{ color: C.Pine }} />
+        <p className="text-sm flex-1 min-w-[200px]" style={{ color: C.Lagoon }}>
+          Dit is het archief van de oude overdracht. Verslagen, teamberichten en
+          actiepunten schrijf je nu in het Dagbord.
+        </p>
+        {setView && (
+          <button
+            onClick={() => setView("dagbord")}
+            className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white"
+            style={{ backgroundColor: C.Pine }}
+          >
+            Naar Dagbord
+          </button>
+        )}
+      </div>
       {/* Tabbladen */}
       <div id="handover-tabs" className="space-y-3">
         {/* Tab-balk */}
@@ -35545,7 +35540,7 @@ const MobileMenu = ({
           {userRole !== "co" && (
             <MenuItem
               icon={BookOpen}
-              label="Overdracht"
+              label="Overdracht (archief)"
               target="handover"
               badge={handoverBadge}
             />
@@ -60317,7 +60312,7 @@ const DagbordView = ({
             subtitle={
               openPunten.length > 0
                 ? `${openPunten.length} nog op te lossen`
-                : "Iets kapot of iets nodig? Zet het hier"
+                : "Belangrijke lopende zaken, bv. iets gemeld bij TD"
             }
             right={
               !newPunt && (
@@ -60338,7 +60333,7 @@ const DagbordView = ({
                 <input
                   autoFocus
                   className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#0A7B6A] bg-white"
-                  placeholder="Wat speelt er? Bv. microfoon 2 kraakt"
+                  placeholder="Wat loopt er? Bv. lekkage podium gemeld bij TD"
                   value={newPunt.title}
                   onChange={(e) => setNewPunt({ ...newPunt, title: e.target.value })}
                   onKeyDown={(e) => e.key === "Enter" && createPunt()}
@@ -62686,9 +62681,11 @@ function AppInner() {
         localStorage.setItem("cp_loginTime", new Date().toISOString());
       }
 
-      // ✅ Taken: onthoud alleen wat deze save echt wijzigt (zie checklistPatches)
-      if (Array.isArray(newData.checklists)) {
-        registerChecklistDiff(appData.checklists, newData.checklists);
+      // ✅ Per-item velden: onthoud alleen wat deze save echt wijzigt (zie PATCH_FIELDS)
+      for (const f of Object.keys(PATCH_FIELDS)) {
+        if (newData[f] !== undefined && newData[f] !== null) {
+          registerFieldDiff(f, appData[f], newData[f]);
+        }
       }
 
       // 🔒 STAP 1: Verzamel wijzigingen met DEEP MERGE (voor debouncing)
@@ -62766,9 +62763,10 @@ function AppInner() {
         const pendingVal = pendingChangesRef.current[key];
         const currentVal = appData[key];
 
-        if (key === "checklists") {
-          optimisticUpdate.checklists = applyChecklistPatches(
-            Array.isArray(currentVal) ? currentVal : pendingVal
+        if (PATCH_FIELDS[key]) {
+          optimisticUpdate[key] = applyFieldPatches(
+            key,
+            currentVal !== undefined && currentVal !== null ? currentVal : pendingVal
           );
           continue;
         }
@@ -62849,7 +62847,9 @@ function AppInner() {
         }
 
         isSavingRef.current = true;
-        const checklistPatchSnap = new Map(checklistPatches);
+        const patchSnaps = {};
+        for (const f of Object.keys(PATCH_FIELDS))
+          patchSnaps[f] = new Map(fieldPatches[f]);
         const changesToSave = { ...pendingChangesRef.current };
         pendingChangesRef.current = {}; // Reset pending changes
         activeSaveRef.current = changesToSave; // Bijhouden voor snapshot merge
@@ -63101,12 +63101,11 @@ function AppInner() {
               if (Object.prototype.hasOwnProperty.call(liveChanges, "orders")) {
                 orderRemovalIntent.clear();
               }
-              // Taak-wijzigingen die nu op de server staan zijn verwerkt
-              if (
-                Object.prototype.hasOwnProperty.call(liveChanges, "checklists")
-              ) {
-                for (const [k, v] of checklistPatchSnap) {
-                  if (checklistPatches.get(k) === v) checklistPatches.delete(k);
+              // Per-item wijzigingen die nu op de server staan zijn verwerkt
+              for (const f of Object.keys(PATCH_FIELDS)) {
+                if (!Object.prototype.hasOwnProperty.call(liveChanges, f)) continue;
+                for (const [k, v] of patchSnaps[f]) {
+                  if (fieldPatches[f].get(k) === v) fieldPatches[f].delete(k);
                 }
               }
 
@@ -63224,11 +63223,12 @@ function AppInner() {
       const serverVal = serverData[key];
       const localVal = localChanges[key];
 
-      if (key === "checklists") {
-        // ✅ Alleen eigen gewijzigde taken toepassen op de server-versie
-        result[key] = applyChecklistPatches(
-          Array.isArray(serverVal) ? serverVal : localVal
-        );
+      if (PATCH_FIELDS[key]) {
+        // ✅ Alleen eigen gewijzigde items toepassen op de server-versie
+        const hasServer = PATCH_FIELDS[key].flatten
+          ? isPlainObj(serverVal)
+          : Array.isArray(serverVal);
+        result[key] = applyFieldPatches(key, hasServer ? serverVal : localVal);
         continue;
       }
 
@@ -64437,7 +64437,10 @@ function AppInner() {
   // 📬 Bereken ongelezen overdrachten voor alle tabs
   // 📬 Bereken ongelezen overdrachten vanaf VANDAAG + TOEKOMST (niet het verleden)
   const dagbordAttention = getDagbordAttention(appData, loggedInUserName);
+  // 📦 Oude overdracht is nu archief: geen "ongelezen"-badges/meldingen meer
+  // (aandacht loopt via dagbordAttention)
   const handoverUnreadCount = (() => {
+    if (true) return 0; // eslint-disable-line no-constant-condition
     if (!appData.handover) return 0;
     const normalizeLogs = (data, dateKey) => {
       if (Array.isArray(data)) return data;
@@ -65917,7 +65920,7 @@ function AppInner() {
                 <SidebarItem
                   id="ho"
                   icon={BookOpen}
-                  label="Overdracht"
+                  label="Overdracht (archief)"
                   onClick={() => {
                     setView("handover");
                     setCurrentDay(new Date());
@@ -67575,7 +67578,7 @@ function AppInner() {
             <div className="w-full max-w-7xl mx-auto overflow-y-auto p-4 md:p-0 pb-24">
               <div className="pb-3 mb-3">
                 <ViewHeader
-                  title="Overdracht"
+                  title="Overdracht (archief)"
                   subtitle={toDutchDate(currentDay)}
                   icon={MessageSquare}
                   theme={currentTheme}
