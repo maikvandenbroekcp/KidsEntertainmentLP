@@ -1798,6 +1798,10 @@ const sanitizeData = (data) => {
     userPrefs: safe.userPrefs || {}, // 🔒 persoonlijke voorkeuren (dashboardindeling, snelkoppelingen) — cross-device
 
     npsScores: safe.npsScores || {},
+    // ⏱️ Dienst gestart/afgesloten — ontbrak in deze lijst, waardoor
+    // starttijden na elke server-update uit de app werden weggefilterd
+    timeClock: isPlainObj(safe.timeClock) ? safe.timeClock : {}, // { "YYYY-MM-DD": { naam: { in, out } } }
+    roosterPrognose: isPlainObj(safe.roosterPrognose) ? safe.roosterPrognose : {},
     dagbord: isPlainObj(safe.dagbord) ? safe.dagbord : {}, // 🧩 { "YYYY-MM-DD": { sleutel: item } }
     openPunten: isPlainObj(safe.openPunten) ? safe.openPunten : {}, // 🧩 { id: punt }
     lastUpdate: safe.lastUpdate || new Date().toISOString(),
