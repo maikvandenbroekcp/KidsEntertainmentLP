@@ -7973,7 +7973,8 @@ const DashboardContent = ({
         );
       }
       case "handover": {
-        if (userRole === "co") return null;
+        // Dagbord staat nu zelf bovenaan het dashboard → widget niet dubbel tonen
+        return null;
         // 🧩 Dagbord-widget (vervangt de losse overdracht-widget)
         const dbToday = appData.dagbord?.[toIsoDate(new Date())] || {};
         const dbBriefing =
@@ -58769,6 +58770,48 @@ const DbCard = ({ icon: Icon, title, subtitle, right, children, accent = C.Pine,
   </div>
 );
 
+// ── Dienst / aanwezigheid (timeClock[datum][naam] = { in, out } als ISO) ──
+const dbHM = (iso) => {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return isNaN(d.getTime())
+    ? ""
+    : d.toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit" });
+};
+const dbToMin = (hhmm) => {
+  const [h, m] = String(hhmm || "").split(":").map(Number);
+  return isNaN(h) ? null : h * 60 + (m || 0);
+};
+const dbIsoMin = (iso) => {
+  if (!iso) return null;
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? null : d.getHours() * 60 + d.getMinutes();
+};
+const dbIsoAt = (dateKey, hhmm) => {
+  const [y, mo, d] = dateKey.split("-").map(Number);
+  const [h, mi] = String(hhmm).split(":").map(Number);
+  return new Date(y, mo - 1, d, h, mi || 0, 0, 0).toISOString();
+};
+const dbDur = (ms) => {
+  const m = Math.max(0, Math.round(ms / 60000));
+  return `${Math.floor(m / 60)}u ${String(m % 60).padStart(2, "0")}m`;
+};
+// Ingeroosterde dienst van iemand op een datum (roostermaker of CSV-rooster)
+const dbPlanned = (appData, dateKey, name) => {
+  const rd = (appData.roosterDiensten?.[dateKey] || []).find((d) =>
+    (d.assigned || []).includes(name)
+  );
+  if (rd && (rd.start || rd.end))
+    return { start: rd.start || "", end: rd.end || "", code: rd.urencode || "" };
+  const ws = (appData.workSchedule?.[dateKey] || []).find(
+    (x) => x.matchedUser === name
+  );
+  if (ws && (ws.start || ws.end))
+    return { start: ws.start || "", end: ws.end || "", code: "" };
+  return null;
+};
+const DB_TOLERANTIE = 5; // minuten speling voor te laat / te vroeg weg
+
 // Telt wat de ingelogde gebruiker op het dagbord nog moet zien
 const getDagbordAttention = (appData, loggedInUserName) => {
   if (!loggedInUserName) return 0;
@@ -58840,6 +58883,10 @@ const DagbordView = ({
   const [closeHidden, setCloseHidden] = useState(false); // herinnering weggeklikt
   const [doorText, setDoorText] = useState("");
   const [doorAsPunt, setDoorAsPunt] = useState(false);
+  const [corrReason, setCorrReason] = useState("");
+  const [corrSent, setCorrSent] = useState(false);
+  const [editClock, setEditClock] = useState(null); // { name, in, out }
+  const [showWeek, setShowWeek] = useState(false);
 
   useEffect(() => {
     setOpenAct(null);
@@ -59117,6 +59164,109 @@ const DagbordView = ({
     if (isNaN(h)) return false;
     const now = new Date();
     return now.getHours() * 60 + now.getMinutes() >= h * 60 + (m || 0) - 30;
+  })();
+
+  // ── Dienst starten / afsluiten (gekoppeld aan timeClock) ───────────
+  const clockDay = appData.timeClock?.[dateKey] || {};
+  const myClock = clockDay[me] || {};
+  const myPlanned = dbPlanned(appData, dateKey, me);
+  const setClockFor = (name, patch) =>
+    updateData({
+      timeClock: {
+        [dateKey]: { [name]: { ...(clockDay[name] || {}), ...patch } },
+      },
+    });
+  const startShift = () => {
+    setClockFor(me, { in: new Date().toISOString(), out: null });
+    cpToast("Dienst gestart — fijne dienst!", "success");
+  };
+  const endShift = () => {
+    setClockFor(me, { out: new Date().toISOString() });
+    cpToast("Dienst afgesloten", "success");
+  };
+  // Afwijking t.o.v. rooster (voor urencorrectie)
+  const myDeviation = (() => {
+    if (!myClock.in || !myClock.out || !myPlanned?.start || !myPlanned?.end)
+      return null;
+    const ps = dbToMin(myPlanned.start);
+    const pe = dbToMin(myPlanned.end);
+    const ai = dbIsoMin(myClock.in);
+    const ao = dbIsoMin(myClock.out);
+    if ([ps, pe, ai, ao].some((x) => x == null)) return null;
+    const diff = Math.abs(ai - ps) + Math.abs(ao - pe);
+    return diff >= 15 ? { start: dbHM(myClock.in), end: dbHM(myClock.out) } : null;
+  })();
+  const alreadyCorrected = (appData.hourCorrections || []).some(
+    (c) => c.name === me && c.date === dateKey && c.source === "dagbord"
+  );
+  const sendCorrection = () => {
+    if (!myDeviation) return;
+    updateData({
+      hourCorrections: [
+        ...(appData.hourCorrections || []),
+        {
+          id: Date.now(),
+          name: me,
+          date: dateKey,
+          start: myDeviation.start,
+          end: myDeviation.end,
+          code: myPlanned?.code || "",
+          reason:
+            corrReason.trim() ||
+            `Gewerkt ${myDeviation.start}–${myDeviation.end}, gepland ${myPlanned.start}–${myPlanned.end}`,
+          processed: false,
+          source: "dagbord",
+        },
+      ],
+    });
+    setCorrSent(true);
+    cpToast("Urencorrectie ingediend", "success");
+  };
+
+  // Aanwezigheid van het hele team (FM)
+  const presenceNames = [
+    ...new Set([...workingNames, ...Object.keys(clockDay)]),
+  ].sort((a, b) => a.localeCompare(b));
+  const presenceRow = (name) => {
+    const c = clockDay[name] || {};
+    const pl = dbPlanned(appData, dateKey, name);
+    const ai = dbIsoMin(c.in);
+    const ao = dbIsoMin(c.out);
+    const ps = dbToMin(pl?.start);
+    const pe = dbToMin(pl?.end);
+    const nowMin = new Date().getHours() * 60 + new Date().getMinutes();
+    const late = ai != null && ps != null && ai > ps + DB_TOLERANTIE;
+    const early = ao != null && pe != null && ao < pe - DB_TOLERANTIE;
+    const missing =
+      !c.in && ps != null && (isPastDay || (isToday && nowMin > ps + DB_TOLERANTIE));
+    const notOut =
+      c.in && !c.out && pe != null && (isPastDay || (isToday && nowMin > pe + 30));
+    const dur = c.in
+      ? (c.out ? new Date(c.out) : isToday ? new Date() : null) - new Date(c.in)
+      : null;
+    return { c, pl, late, early, missing, notOut, dur };
+  };
+  const saveClockEdit = () => {
+    if (!editClock) return;
+    const patch = {
+      in: editClock.in ? dbIsoAt(dateKey, editClock.in) : null,
+      out: editClock.out ? dbIsoAt(dateKey, editClock.out) : null,
+      correctedBy: me,
+      correctedAt: Date.now(),
+    };
+    setClockFor(editClock.name, patch);
+    setEditClock(null);
+  };
+  // Weekoverzicht (ma–zo van de getoonde week)
+  const weekDays = (() => {
+    const d = new Date(currentDay);
+    const dow = (d.getDay() + 6) % 7;
+    d.setDate(d.getDate() - dow);
+    return Array.from({ length: 7 }, (_, i) => {
+      const x = new Date(d);
+      x.setDate(d.getDate() + i);
+      return x;
+    });
   })();
 
   const saveReport = (act, f) => {
@@ -59422,8 +59572,85 @@ const DagbordView = ({
 
   return (
     <div className="space-y-4">
+      {/* Dienst starten / afsluiten */}
+      {isToday && (
+        <div
+          className="rounded-2xl px-4 py-3 flex items-center gap-3 flex-wrap"
+          style={{
+            backgroundColor: myClock.in && !myClock.out ? C.PineLight : "white",
+            border: `1px solid ${myClock.in && !myClock.out ? `${C.Pine}40` : "#F3F4F6"}`,
+          }}
+        >
+          <div
+            className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
+            style={{ backgroundColor: myClock.in && !myClock.out ? C.Pine : `${C.Pine}14` }}
+          >
+            <Clock size={20} color={myClock.in && !myClock.out ? "white" : C.Pine} />
+          </div>
+          <div className="flex-1 min-w-[180px]">
+            {!myClock.in ? (
+              <>
+                <p className="text-sm font-bold" style={{ color: C.Lagoon }}>
+                  Je dienst is nog niet gestart
+                </p>
+                <p className="text-xs text-gray-500">
+                  {myPlanned?.start
+                    ? `Ingeroosterd ${myPlanned.start}–${myPlanned.end}`
+                    : "Niet ingeroosterd vandaag"}
+                </p>
+              </>
+            ) : !myClock.out ? (
+              <>
+                <p className="text-sm font-bold" style={{ color: C.Pine }}>
+                  Aan het werk sinds {dbHM(myClock.in)}
+                </p>
+                <p className="text-xs text-gray-500">
+                  {dbDur(Date.now() - new Date(myClock.in))}
+                  {myPlanned?.end ? ` · gepland tot ${myPlanned.end}` : ""}
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="text-sm font-bold" style={{ color: C.Lagoon }}>
+                  Dienst afgesloten
+                </p>
+                <p className="text-xs text-gray-500">
+                  {dbHM(myClock.in)}–{dbHM(myClock.out)} ·{" "}
+                  {dbDur(new Date(myClock.out) - new Date(myClock.in))}
+                </p>
+              </>
+            )}
+          </div>
+          {!myClock.in ? (
+            <button
+              onClick={startShift}
+              className="px-5 py-2.5 rounded-xl text-sm font-bold text-white flex items-center gap-2"
+              style={{ backgroundColor: C.Pine }}
+            >
+              <Sun size={16} /> Dienst starten
+            </button>
+          ) : !myClock.out ? (
+            <button
+              onClick={() => setShowClose(true)}
+              className="px-5 py-2.5 rounded-xl text-sm font-bold text-white flex items-center gap-2"
+              style={{ backgroundColor: C.Bark }}
+            >
+              <Moon size={16} /> Dienst afsluiten
+            </button>
+          ) : (
+            <button
+              onClick={() => setShowClose(true)}
+              className="px-3 py-2 rounded-xl text-xs font-semibold"
+              style={{ backgroundColor: `${C.Pine}12`, color: C.Pine }}
+            >
+              Afsluiting bekijken
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Herinnering: dienst zit er (bijna) op */}
-      {shiftAlmostDone && outgoing.length === 0 && !closeHidden && !showClose && (
+      {shiftAlmostDone && myClock.in && !myClock.out && !closeHidden && !showClose && (
         <div
           className="rounded-2xl px-4 py-3 flex items-center gap-3 flex-wrap"
           style={{ backgroundColor: C.HoneyLight, border: `1px solid ${C.Honey}` }}
@@ -59782,13 +60009,61 @@ const DagbordView = ({
                   Doorgeven aan {dagNaam(nextDate)}
                 </button>
               </div>
-              <button
-                onClick={() => setShowClose(false)}
-                className="w-full py-2.5 rounded-xl text-sm font-semibold"
-                style={{ backgroundColor: C.Pine, color: "white" }}
-              >
-                Klaar
-              </button>
+              {isToday && myClock.in && !myClock.out ? (
+                <button
+                  onClick={endShift}
+                  className="w-full py-3 rounded-xl text-sm font-bold flex items-center justify-center gap-2"
+                  style={{ backgroundColor: C.Pine, color: "white" }}
+                >
+                  <Moon size={16} /> Dienst afsluiten om {dbHM(new Date().toISOString())}
+                </button>
+              ) : (
+                <>
+                  {myClock.in && myClock.out && (
+                    <p className="text-sm text-center" style={{ color: C.Pine }}>
+                      Gewerkt {dbHM(myClock.in)}–{dbHM(myClock.out)} (
+                      {dbDur(new Date(myClock.out) - new Date(myClock.in))})
+                    </p>
+                  )}
+                  {myDeviation && !alreadyCorrected && !corrSent && (
+                    <div className="rounded-xl p-3 space-y-2 border border-gray-200">
+                      <p className="text-sm font-semibold" style={{ color: C.Lagoon }}>
+                        Je tijden wijken af van het rooster
+                      </p>
+                      <p className="text-xs text-gray-500">
+                        Gepland {myPlanned.start}–{myPlanned.end}, gewerkt{" "}
+                        {myDeviation.start}–{myDeviation.end}. Dien direct een
+                        urencorrectie in.
+                      </p>
+                      <input
+                        className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#0A7B6A]"
+                        placeholder="Reden, bv. langer gebleven voor opruimen Prize Night"
+                        value={corrReason}
+                        onChange={(e) => setCorrReason(e.target.value)}
+                      />
+                      <button
+                        onClick={sendCorrection}
+                        className="w-full py-2 rounded-lg text-sm font-semibold"
+                        style={{ backgroundColor: `${C.Pine}12`, color: C.Pine }}
+                      >
+                        Urencorrectie indienen
+                      </button>
+                    </div>
+                  )}
+                  {(alreadyCorrected || corrSent) && myDeviation && (
+                    <p className="text-xs text-center text-gray-500">
+                      Urencorrectie is ingediend.
+                    </p>
+                  )}
+                  <button
+                    onClick={() => setShowClose(false)}
+                    className="w-full py-2.5 rounded-xl text-sm font-semibold"
+                    style={{ backgroundColor: C.Pine, color: "white" }}
+                  >
+                    Klaar
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -59813,6 +60088,157 @@ const DagbordView = ({
         </DbCard>
 
         <div className="space-y-4">
+          {/* Aanwezigheid (FM) */}
+          {isFM && (presenceNames.length > 0 || showWeek) && (
+            <DbCard
+              icon={Users}
+              title="Aanwezigheid"
+              subtitle="Dienst gestart en afgesloten, tegenover het rooster"
+              right={
+                <button
+                  onClick={() => setShowWeek((v) => !v)}
+                  className="text-xs font-semibold px-2.5 py-1.5 rounded-lg"
+                  style={{ backgroundColor: `${C.Pine}12`, color: C.Pine }}
+                >
+                  {showWeek ? "Dag" : "Week"}
+                </button>
+              }
+            >
+              {!showWeek ? (
+                <div className="divide-y divide-gray-100">
+                  {presenceNames.map((name) => {
+                    const r = presenceRow(name);
+                    const editing = editClock?.name === name;
+                    return (
+                      <div key={name} className="py-2">
+                        <div className="flex items-center gap-2">
+                          <ProfileAvatar name={name} staffList={staffList} size={24} />
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-semibold text-gray-800 truncate">
+                              {name}
+                            </p>
+                            <p className="text-[11px] text-gray-400">
+                              {r.pl?.start ? `Gepland ${r.pl.start}–${r.pl.end}` : "Niet ingeroosterd"}
+                            </p>
+                          </div>
+                          {!editing && (
+                            <button
+                              onClick={() =>
+                                setEditClock({ name, in: dbHM(r.c.in), out: dbHM(r.c.out) })
+                              }
+                              className="text-right"
+                              title="Tijden aanpassen"
+                            >
+                              <p className="text-sm font-semibold tabular-nums">
+                                <span style={{ color: r.late ? "#B91C1C" : r.c.in ? C.Pine : "#9CA3AF" }}>
+                                  {r.c.in ? dbHM(r.c.in) : "--:--"}
+                                </span>
+                                <span className="text-gray-300"> – </span>
+                                <span style={{ color: r.early ? "#B45309" : r.c.out ? C.Pine : "#9CA3AF" }}>
+                                  {r.c.out ? dbHM(r.c.out) : "--:--"}
+                                </span>
+                              </p>
+                              <p className="text-[11px] text-gray-400">
+                                {r.missing
+                                  ? "niet gestart"
+                                  : r.notOut
+                                  ? "niet afgesloten"
+                                  : r.dur != null
+                                  ? dbDur(r.dur)
+                                  : ""}
+                                {r.late && " · te laat"}
+                                {r.early && " · eerder weg"}
+                                {r.c.correctedBy && " · aangepast"}
+                              </p>
+                            </button>
+                          )}
+                        </div>
+                        {editing && (
+                          <div className="flex items-center gap-2 mt-2 pl-8">
+                            <input
+                              type="time"
+                              className="border border-gray-200 rounded-lg px-2 py-1 text-sm"
+                              value={editClock.in}
+                              onChange={(e) => setEditClock({ ...editClock, in: e.target.value })}
+                            />
+                            <span className="text-gray-300">–</span>
+                            <input
+                              type="time"
+                              className="border border-gray-200 rounded-lg px-2 py-1 text-sm"
+                              value={editClock.out}
+                              onChange={(e) => setEditClock({ ...editClock, out: e.target.value })}
+                            />
+                            <button
+                              onClick={saveClockEdit}
+                              className="px-2.5 py-1 rounded-lg text-xs font-semibold text-white"
+                              style={{ backgroundColor: C.Pine }}
+                            >
+                              Opslaan
+                            </button>
+                            <button
+                              onClick={() => setEditClock(null)}
+                              className="text-gray-400"
+                            >
+                              <X size={14} />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="overflow-x-auto -mx-1">
+                  <table className="w-full text-[11px] tabular-nums">
+                    <thead>
+                      <tr className="text-gray-400">
+                        <th className="text-left font-semibold py-1 px-1">Naam</th>
+                        {weekDays.map((d) => (
+                          <th key={d.toISOString()} className="font-semibold py-1 px-1 text-center whitespace-nowrap">
+                            {d.toLocaleDateString("nl-NL", { weekday: "short", day: "numeric" })}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {[
+                        ...new Set(
+                          weekDays.flatMap((d) =>
+                            Object.keys(appData.timeClock?.[toIsoDate(d)] || {})
+                          )
+                        ),
+                      ]
+                        .sort((a, b) => a.localeCompare(b))
+                        .map((name) => (
+                          <tr key={name} className="border-t border-gray-100">
+                            <td className="py-1.5 px-1 font-semibold text-gray-700 whitespace-nowrap">
+                              {name}
+                            </td>
+                            {weekDays.map((d) => {
+                              const c = appData.timeClock?.[toIsoDate(d)]?.[name];
+                              return (
+                                <td key={d.toISOString()} className="py-1.5 px-1 text-center whitespace-nowrap text-gray-600">
+                                  {c?.in ? (
+                                    <>
+                                      {dbHM(c.in)}
+                                      <br />
+                                      {c.out ? dbHM(c.out) : "…"}
+                                    </>
+                                  ) : (
+                                    <span className="text-gray-300">–</span>
+                                  )}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </DbCard>
+          )}
+
           {/* Extra taken */}
           {extraTasks.length > 0 && (
             <DbCard
@@ -66472,6 +66898,29 @@ function AppInner() {
                     </div>
                   );
                 })()}
+
+                {/* 🧩 DAGBORD — hoofdpagina: dienst, briefing, planning, punten */}
+                {userRole !== "co" && (
+                  <DagbordView
+                    currentDay={currentDay}
+                    appData={appData}
+                    updateData={saveData}
+                    loggedInUserName={loggedInUserName}
+                    userRole={userRole}
+                    getDailyTasks={getDailyTasks}
+                    onCheckTask={handleCheckTask}
+                    onNvtTask={handleNvtTask}
+                  />
+                )}
+                {userRole !== "co" && (
+                  <div className="flex items-center gap-3 pt-4 pb-1">
+                    <div className="h-px flex-1 bg-gray-200" />
+                    <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                      Dashboard
+                    </span>
+                    <div className="h-px flex-1 bg-gray-200" />
+                  </div>
+                )}
 
                 {/* ═══════════════════════════════════════════════════
                     DASHBOARD GRID — 3 kolommen, drag & drop, resize
