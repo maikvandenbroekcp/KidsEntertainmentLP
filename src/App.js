@@ -8005,8 +8005,8 @@ const DashboardContent = ({
                 </h3>
                 <p className="text-xs text-gray-500">
                   {dbOpen.length > 0
-                    ? `${dbOpen.length} open ${dbOpen.length === 1 ? "punt" : "punten"}`
-                    : "Geen open punten"}
+                    ? `${dbOpen.length} ${dbOpen.length === 1 ? "actiepunt" : "actiepunten"}`
+                    : "Geen actiepunten"}
                 </p>
               </div>
               {dbAttention > 0 && (
@@ -8038,7 +8038,7 @@ const DashboardContent = ({
               )}
               {dbMine.length > 0 && (
                 <p className="text-xs font-semibold" style={{ color: "#B45309" }}>
-                  {dbMine.length} open {dbMine.length === 1 ? "punt staat" : "punten staan"} op jouw naam
+                  {dbMine.length} {dbMine.length === 1 ? "actiepunt staat" : "actiepunten staan"} op jouw naam
                 </p>
               )}
             </div>
@@ -59335,7 +59335,7 @@ const DagbordView = ({
     const reacties = {};
     const note = (newPunt.note || "").trim();
     if (note) reacties[dbNewId()] = { author: me, text: note, at: now };
-    const notifs = mentionNotifs(`${title} ${note}`, "Open punt");
+    const notifs = mentionNotifs(`${title} ${note}`, "Actiepunt");
     if (newPunt.assignee && newPunt.assignee !== me && !notifs.some((n) => n.mentionedUser === newPunt.assignee)) {
       notifs.push({
         id: `mention_${now}_${Math.random().toString(36).slice(2)}`,
@@ -59343,7 +59343,7 @@ const DagbordView = ({
         mentionedUser: newPunt.assignee,
         author: me,
         source: "dagbord",
-        sourceLabel: "Open punt voor jou",
+        sourceLabel: "Actiepunt voor jou",
         dateKey,
         text: title,
         createdAt: new Date().toISOString(),
@@ -59379,7 +59379,7 @@ const DagbordView = ({
           },
         },
       },
-      mentionNotifs(text, `Open punt: ${p.title}`)
+      mentionNotifs(text, `Actiepunt: ${p.title}`)
     );
   };
   const readReactie = (p, r) =>
@@ -59398,7 +59398,7 @@ const DagbordView = ({
               mentionedUser: name,
               author: me,
               source: "dagbord",
-              sourceLabel: "Open punt voor jou",
+              sourceLabel: "Actiepunt voor jou",
               dateKey,
               text: p.title,
               createdAt: new Date().toISOString(),
@@ -59763,7 +59763,7 @@ const DagbordView = ({
           )}
           {openPunten.length > 0 && (
             <DbPill bg="#FEF3C7" text="#92400E">
-              {openPunten.length} open {openPunten.length === 1 ? "punt" : "punten"}
+              {openPunten.length} {openPunten.length === 1 ? "actiepunt" : "actiepunten"}
             </DbPill>
           )}
           {isPastDay && (
@@ -60098,7 +60098,7 @@ const DagbordView = ({
               )}
               {myPunten.length > 0 && (
                 <p className="text-xs font-semibold" style={{ color: "#B45309" }}>
-                  {myPunten.length} open {myPunten.length === 1 ? "punt staat" : "punten staan"} op jouw naam.
+                  {myPunten.length} open {myPunten.length === 1 ? "actiepunt staat" : "actiepunten staan"} op jouw naam.
                 </p>
               )}
               {myOpenActs.length === 0 && openDayTasks.length === 0 && (
@@ -60139,7 +60139,7 @@ const DagbordView = ({
                     checked={doorAsPunt}
                     onChange={(e) => setDoorAsPunt(e.target.checked)}
                   />
-                  Ook als open punt (blijft staan tot iemand het oplost)
+                  Ook als actiepunt (blijft staan tot het is opgelost)
                 </label>
                 <button
                   onClick={sendDoorgeven}
@@ -60209,7 +60209,166 @@ const DagbordView = ({
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)] gap-4 items-start">
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)] lg:grid-rows-[auto_1fr] gap-4 items-start">
+        {/* Communicatie: op mobiel direct onder de briefing, op desktop rechtsboven */}
+        <div className="space-y-4 lg:col-start-2 lg:row-start-1">
+          {/* Teamberichten */}
+          <DbCard
+            icon={MessageCircle}
+            title="Teamberichten"
+            subtitle="Voor iedereen die vandaag werkt"
+          >
+            <DbThread
+              items={commentsFor("day")}
+              staffList={staffList}
+              loggedInUserName={me}
+              onSend={(t, imp) => addComment("day", t, "Teamberichten", imp)}
+              onRead={readComment}
+              onDelete={deleteComment}
+              emptyText="Nog geen berichten vandaag."
+              placeholder="Deel iets met het team… (@naam of @team)"
+            />
+          </DbCard>
+
+          {/* Actiepunten */}
+          <DbCard
+            icon={AlertTriangle}
+            accent="#B45309"
+            title="Actiepunten"
+            subtitle={
+              openPunten.length > 0
+                ? `${openPunten.length} nog op te lossen`
+                : "Iets kapot of iets nodig? Zet het hier"
+            }
+            right={
+              !newPunt && (
+                <button
+                  onClick={() =>
+                    setNewPunt({ title: "", afdeling: afdeling, assignee: "", note: "" })
+                  }
+                  className="text-xs font-semibold px-2.5 py-1.5 rounded-lg flex items-center gap-1"
+                  style={{ backgroundColor: `${C.Pine}12`, color: C.Pine }}
+                >
+                  <Plus size={13} /> Toevoegen
+                </button>
+              )
+            }
+          >
+            {newPunt && (
+              <div className="rounded-xl border border-gray-200 p-3 mb-3 space-y-2 bg-gray-50">
+                <input
+                  autoFocus
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#0A7B6A] bg-white"
+                  placeholder="Wat speelt er? Bv. microfoon 2 kraakt"
+                  value={newPunt.title}
+                  onChange={(e) => setNewPunt({ ...newPunt, title: e.target.value })}
+                  onKeyDown={(e) => e.key === "Enter" && createPunt()}
+                />
+                <div className="grid grid-cols-2 gap-2">
+                  <StyledSelect
+                    className="border border-gray-200 rounded-lg text-xs px-2 py-1.5 bg-white"
+                    value={newPunt.afdeling}
+                    onChange={(e) => setNewPunt({ ...newPunt, afdeling: e.target.value })}
+                  >
+                    {DB_AFDELINGEN.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.id === "alle" ? "Hele team" : a.label}
+                      </option>
+                    ))}
+                  </StyledSelect>
+                  <StyledSelect
+                    className="border border-gray-200 rounded-lg text-xs px-2 py-1.5 bg-white"
+                    value={newPunt.assignee}
+                    onChange={(e) => setNewPunt({ ...newPunt, assignee: e.target.value })}
+                  >
+                    <option value="">Niemand toewijzen</option>
+                    <option value="Maik">Maik</option>
+                    {staffList
+                      .filter((s) => !s.inactive && s.name !== "Maik")
+                      .sort((a, b) => a.name.localeCompare(b.name))
+                      .map((s) => (
+                        <option key={s.name} value={s.name}>
+                          {s.name}
+                        </option>
+                      ))}
+                  </StyledSelect>
+                </div>
+                <MentionTextarea
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#0A7B6A] resize-none bg-white h-16"
+                  placeholder="Toelichting (optioneel)"
+                  value={newPunt.note}
+                  onChange={(e) => setNewPunt({ ...newPunt, note: e.target.value })}
+                  staffList={staffList}
+                  loggedInUserName={me}
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={createPunt}
+                    className="flex-1 py-1.5 rounded-lg text-sm font-semibold text-white"
+                    style={{ backgroundColor: C.Pine, opacity: newPunt.title.trim() ? 1 : 0.5 }}
+                  >
+                    Toevoegen
+                  </button>
+                  <button
+                    onClick={() => setNewPunt(null)}
+                    className="px-3 py-1.5 rounded-lg text-sm text-gray-500 bg-white border border-gray-200"
+                  >
+                    Annuleren
+                  </button>
+                </div>
+              </div>
+            )}
+            {openPunten.length === 0 && !newPunt && (
+              <p className="text-xs text-gray-400 italic py-1">
+                Alles is geregeld.
+              </p>
+            )}
+            {openPunten.map((p) => (
+              <DbPuntItem
+                key={p.id}
+                punt={p}
+                staffList={staffList}
+                loggedInUserName={me}
+                userRole={userRole}
+                onReact={(t, imp) => reactPunt(p, t, imp)} onReadReactie={(r) => readReactie(p, r)}
+                onResolve={() => resolvePunt(p)}
+                onReopen={() => reopenPunt(p)}
+                onAssign={(n) => assignPunt(p, n)}
+                onDelete={() => deletePunt(p)}
+              />
+            ))}
+            {resolvedPunten.length > 0 && (
+              <div className="mt-2 pt-2 border-t border-gray-100">
+                <button
+                  onClick={() => setShowResolved((s) => !s)}
+                  className="text-xs font-semibold text-gray-400 hover:text-gray-600 flex items-center gap-1"
+                >
+                  {showResolved ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                  Opgelost, laatste 2 weken ({resolvedPunten.length})
+                </button>
+                {showResolved &&
+                  resolvedPunten.map((p) => (
+                    <DbPuntItem
+                      key={p.id}
+                      punt={p}
+                      staffList={staffList}
+                      loggedInUserName={me}
+                      userRole={userRole}
+                      onReact={(t, imp) => reactPunt(p, t, imp)} onReadReactie={(r) => readReactie(p, r)}
+                      onResolve={() => resolvePunt(p)}
+                      onReopen={() => reopenPunt(p)}
+                      onAssign={(n) => assignPunt(p, n)}
+                      onDelete={() => deletePunt(p)}
+                    />
+                  ))}
+              </div>
+            )}
+          </DbCard>
+
+        </div>
+
+        {/* Dagplanning: op desktop links over de volle hoogte */}
+        <div className="lg:col-start-1 lg:row-start-1 lg:row-span-2">
         {/* Tijdlijn */}
         <DbCard
           icon={Clock}
@@ -60226,8 +60385,43 @@ const DagbordView = ({
           {renderTaskBlock("gedurende", "Gedurende de dag", ClipboardList)}
           {renderTaskBlock("afsluiting", "Afsluiten", Moon)}
         </DbCard>
+        </div>
 
-        <div className="space-y-4">
+        {/* Overig */}
+        <div className="space-y-4 lg:col-start-2 lg:row-start-2">
+          {/* Extra taken */}
+          {extraTasks.length > 0 && (
+            <DbCard
+              icon={CheckSquare}
+              accent={C.Lagoon}
+              title="Extra taken"
+              subtitle={
+                extraOpen.length > 0
+                  ? `${extraOpen.length} nog te doen · blijven staan tot ze af zijn`
+                  : "Alles afgerond"
+              }
+            >
+              {extraOpen.length === 0 && (
+                <p className="text-xs text-gray-400 italic py-1">
+                  Geen openstaande extra taken.
+                </p>
+              )}
+              {extraOpen.map((t) => renderTask(t))}
+              {extraDone.length > 0 && (
+                <div className="mt-2 pt-2 border-t border-gray-100">
+                  <button
+                    onClick={() => setShowExtraDone((v) => !v)}
+                    className="text-xs font-semibold text-gray-400 hover:text-gray-600 flex items-center gap-1"
+                  >
+                    {showExtraDone ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                    Afgerond ({extraDone.length})
+                  </button>
+                  {showExtraDone && extraDone.map((t) => renderTask(t))}
+                </div>
+              )}
+            </DbCard>
+          )}
+
           {/* Aanwezigheid (FM) */}
           {isFM && (presenceNames.length > 0 || showWeek) && (
             <DbCard
@@ -60378,188 +60572,6 @@ const DagbordView = ({
               )}
             </DbCard>
           )}
-
-          {/* Extra taken */}
-          {extraTasks.length > 0 && (
-            <DbCard
-              icon={CheckSquare}
-              accent={C.Lagoon}
-              title="Extra taken"
-              subtitle={
-                extraOpen.length > 0
-                  ? `${extraOpen.length} nog te doen · blijven staan tot ze af zijn`
-                  : "Alles afgerond"
-              }
-            >
-              {extraOpen.length === 0 && (
-                <p className="text-xs text-gray-400 italic py-1">
-                  Geen openstaande extra taken.
-                </p>
-              )}
-              {extraOpen.map((t) => renderTask(t))}
-              {extraDone.length > 0 && (
-                <div className="mt-2 pt-2 border-t border-gray-100">
-                  <button
-                    onClick={() => setShowExtraDone((v) => !v)}
-                    className="text-xs font-semibold text-gray-400 hover:text-gray-600 flex items-center gap-1"
-                  >
-                    {showExtraDone ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-                    Afgerond ({extraDone.length})
-                  </button>
-                  {showExtraDone && extraDone.map((t) => renderTask(t))}
-                </div>
-              )}
-            </DbCard>
-          )}
-
-          {/* Open punten */}
-          <DbCard
-            icon={AlertTriangle}
-            accent="#B45309"
-            title="Open punten"
-            subtitle="Blijven staan tot iemand ze oplost"
-            right={
-              !newPunt && (
-                <button
-                  onClick={() =>
-                    setNewPunt({ title: "", afdeling: afdeling, assignee: "", note: "" })
-                  }
-                  className="text-xs font-semibold px-2.5 py-1.5 rounded-lg flex items-center gap-1"
-                  style={{ backgroundColor: `${C.Pine}12`, color: C.Pine }}
-                >
-                  <Plus size={13} /> Nieuw
-                </button>
-              )
-            }
-          >
-            {newPunt && (
-              <div className="rounded-xl border border-gray-200 p-3 mb-3 space-y-2 bg-gray-50">
-                <input
-                  autoFocus
-                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#0A7B6A] bg-white"
-                  placeholder="Wat speelt er? Bv. microfoon 2 kraakt"
-                  value={newPunt.title}
-                  onChange={(e) => setNewPunt({ ...newPunt, title: e.target.value })}
-                  onKeyDown={(e) => e.key === "Enter" && createPunt()}
-                />
-                <div className="grid grid-cols-2 gap-2">
-                  <StyledSelect
-                    className="border border-gray-200 rounded-lg text-xs px-2 py-1.5 bg-white"
-                    value={newPunt.afdeling}
-                    onChange={(e) => setNewPunt({ ...newPunt, afdeling: e.target.value })}
-                  >
-                    {DB_AFDELINGEN.map((a) => (
-                      <option key={a.id} value={a.id}>
-                        {a.id === "alle" ? "Hele team" : a.label}
-                      </option>
-                    ))}
-                  </StyledSelect>
-                  <StyledSelect
-                    className="border border-gray-200 rounded-lg text-xs px-2 py-1.5 bg-white"
-                    value={newPunt.assignee}
-                    onChange={(e) => setNewPunt({ ...newPunt, assignee: e.target.value })}
-                  >
-                    <option value="">Niemand toewijzen</option>
-                    <option value="Maik">Maik</option>
-                    {staffList
-                      .filter((s) => !s.inactive && s.name !== "Maik")
-                      .sort((a, b) => a.name.localeCompare(b.name))
-                      .map((s) => (
-                        <option key={s.name} value={s.name}>
-                          {s.name}
-                        </option>
-                      ))}
-                  </StyledSelect>
-                </div>
-                <MentionTextarea
-                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#0A7B6A] resize-none bg-white h-16"
-                  placeholder="Toelichting (optioneel)"
-                  value={newPunt.note}
-                  onChange={(e) => setNewPunt({ ...newPunt, note: e.target.value })}
-                  staffList={staffList}
-                  loggedInUserName={me}
-                />
-                <div className="flex gap-2">
-                  <button
-                    onClick={createPunt}
-                    className="flex-1 py-1.5 rounded-lg text-sm font-semibold text-white"
-                    style={{ backgroundColor: C.Pine, opacity: newPunt.title.trim() ? 1 : 0.5 }}
-                  >
-                    Toevoegen
-                  </button>
-                  <button
-                    onClick={() => setNewPunt(null)}
-                    className="px-3 py-1.5 rounded-lg text-sm text-gray-500 bg-white border border-gray-200"
-                  >
-                    Annuleren
-                  </button>
-                </div>
-              </div>
-            )}
-            {openPunten.length === 0 && !newPunt && (
-              <p className="text-xs text-gray-400 italic py-1">
-                Geen open punten. Loopt er iets? Zet het hier, dan raakt het niet kwijt.
-              </p>
-            )}
-            {openPunten.map((p) => (
-              <DbPuntItem
-                key={p.id}
-                punt={p}
-                staffList={staffList}
-                loggedInUserName={me}
-                userRole={userRole}
-                onReact={(t, imp) => reactPunt(p, t, imp)} onReadReactie={(r) => readReactie(p, r)}
-                onResolve={() => resolvePunt(p)}
-                onReopen={() => reopenPunt(p)}
-                onAssign={(n) => assignPunt(p, n)}
-                onDelete={() => deletePunt(p)}
-              />
-            ))}
-            {resolvedPunten.length > 0 && (
-              <div className="mt-2 pt-2 border-t border-gray-100">
-                <button
-                  onClick={() => setShowResolved((s) => !s)}
-                  className="text-xs font-semibold text-gray-400 hover:text-gray-600 flex items-center gap-1"
-                >
-                  {showResolved ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-                  Opgelost, laatste 2 weken ({resolvedPunten.length})
-                </button>
-                {showResolved &&
-                  resolvedPunten.map((p) => (
-                    <DbPuntItem
-                      key={p.id}
-                      punt={p}
-                      staffList={staffList}
-                      loggedInUserName={me}
-                      userRole={userRole}
-                      onReact={(t, imp) => reactPunt(p, t, imp)} onReadReactie={(r) => readReactie(p, r)}
-                      onResolve={() => resolvePunt(p)}
-                      onReopen={() => reopenPunt(p)}
-                      onAssign={(n) => assignPunt(p, n)}
-                      onDelete={() => deletePunt(p)}
-                    />
-                  ))}
-              </div>
-            )}
-          </DbCard>
-
-          {/* Gesprek van de dag */}
-          <DbCard
-            icon={MessageCircle}
-            title="Gesprek van de dag"
-            subtitle="Korte afstemming met het hele team"
-          >
-            <DbThread
-              items={commentsFor("day")}
-              staffList={staffList}
-              loggedInUserName={me}
-              onSend={(t, imp) => addComment("day", t, "Gesprek van de dag", imp)}
-              onRead={readComment}
-              onDelete={deleteComment}
-              emptyText="Nog niets gedeeld vandaag."
-              placeholder="Deel iets met het team… (@naam of @team)"
-            />
-          </DbCard>
 
           {/* Oude overdracht */}
           {legacyItems.length > 0 && (
