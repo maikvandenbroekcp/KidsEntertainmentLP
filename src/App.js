@@ -58828,6 +58828,8 @@ const dbPlanned = (appData, dateKey, name) => {
     };
   return null;
 };
+const DB_PAUZE_VANAF_MIN = 330; // 5,5 uur
+const DB_PAUZE_MIN = 30;
 // "23 min" of "1u 05m"
 const dbMinLabel = (m) => {
   const v = Math.max(0, Math.round(m));
@@ -58855,6 +58857,9 @@ const dbWorked = (clock, planned) => {
       pauzes.push(`${b.start}–${b.end}`);
     }
   }
+  // Pauzeregel: dienst van 5,5 uur of langer → minimaal 30 min pauze eraf
+  // (ook als er geen of een kortere pauze is ingeroosterd)
+  if (total >= DB_PAUZE_VANAF_MIN && pauze < DB_PAUZE_MIN) pauze = DB_PAUZE_MIN;
   return { min: Math.max(0, total - pauze), pauze, pauzes };
 };
 const DB_TOLERANTIE = 5;
