@@ -75,7 +75,25 @@ const DATE_KEYED_FIELDS = [
   "planningStatus",
   "springkussenChecks",
   "timeClock",
+  "dagbord",
 ];
+
+// 🧩 DAGBORD / OPEN PUNTEN — velden die recursief (per sleutel) gemerged
+// worden. Elk bericht, verslag, leesbevestiging en reactie heeft een eigen
+// sleutel, dus twee collega's die tegelijk opslaan overschrijven elkaar nooit.
+// Verwijderen gaat via een vlag (deleted: true), nooit via het weghalen van
+// een sleutel — een merge kan alleen toevoegen/overschrijven.
+const DEEP_MERGE_FIELDS = new Set(["dagbord", "openPunten"]);
+const isPlainObj = (v) =>
+  v !== null && typeof v === "object" && !Array.isArray(v);
+const deepMergePlain = (base, patch) => {
+  if (!isPlainObj(base) || !isPlainObj(patch)) return patch;
+  const out = { ...base };
+  for (const [k, v] of Object.entries(patch)) {
+    out[k] = isPlainObj(v) && isPlainObj(base[k]) ? deepMergePlain(base[k], v) : v;
+  }
+  return out;
+};
 
 // Arrays met een .date property (YYYY-MM-DD)
 const DATE_ARRAY_FIELDS = [
@@ -430,6 +448,8 @@ import {
   Wand2,
   Type,
   Loader2,
+  MessageCircle,
+  History,
 } from "lucide-react";
 
 // ============================================================================
@@ -1728,6 +1748,8 @@ const sanitizeData = (data) => {
     userPrefs: safe.userPrefs || {}, // 🔒 persoonlijke voorkeuren (dashboardindeling, snelkoppelingen) — cross-device
 
     npsScores: safe.npsScores || {},
+    dagbord: isPlainObj(safe.dagbord) ? safe.dagbord : {}, // 🧩 { "YYYY-MM-DD": { sleutel: item } }
+    openPunten: isPlainObj(safe.openPunten) ? safe.openPunten : {}, // 🧩 { id: punt }
     lastUpdate: safe.lastUpdate || new Date().toISOString(),
   };
 };
@@ -3102,6 +3124,7 @@ const MentionNotificationPopup = ({ notification, onClose, onGoTo }) => {
         <div className="flex gap-2 px-4 pb-4">
           <button
             onClick={() => {
+              if (notification.source !== "dagbord")
               window.dispatchEvent(
                 new CustomEvent("handover-goto", {
                   detail: {
@@ -3116,7 +3139,10 @@ const MentionNotificationPopup = ({ notification, onClose, onGoTo }) => {
             className="flex-1 text-sm font-bold py-2 rounded-xl text-white flex items-center justify-center gap-1"
             style={{ background: C.Pine }}
           >
-            <ArrowRight size={14} /> Ga naar overdracht
+            <ArrowRight size={14} />{" "}
+            {notification.source === "dagbord"
+              ? "Ga naar dagbord"
+              : "Ga naar overdracht"}
           </button>
           <button
             onClick={onClose}
@@ -6825,6 +6851,7 @@ const BirthdayWidget = ({ staffList, currentDay, fmDob }) => {
 const ALL_QUICK_LINKS = [
   { id: "schedule", label: "Programma", icon: Calendar },
   { id: "rooster", label: "Rooster", icon: CalendarDays },
+  { id: "dagbord", label: "Dagbord", icon: LayoutDashboard },
   { id: "handover", label: "Overdrachten", icon: BookOpen },
   { id: "occupancy", label: "Bezetting", icon: Home },
   { id: "fm_checklist", label: "FM Checklist", icon: ClipboardCheck },
@@ -6848,7 +6875,7 @@ const DASHBOARD_WIDGET_DEFAULTS = [
   { id: "timeline", label: "Mijn dag", size: 1 },
   { id: "team", label: "Team vandaag", size: 1 },
   { id: "occupancy", label: "Bezetting", size: 1 },
-  { id: "handover", label: "Overdrachten", size: 1 },
+  { id: "handover", label: "Dagbord", size: 1 },
   { id: "checklist", label: "FM Checklist", size: 1 },
   { id: "tasks", label: "Taken", size: 2 },
   { id: "schedule", label: "Programma", size: 2 },
@@ -7895,8 +7922,24 @@ const DashboardContent = ({
           </div>
         );
       }
-      case "handover":
+      case "handover": {
         if (userRole === "co") return null;
+        // 🧩 Dagbord-widget (vervangt de losse overdracht-widget)
+        const dbToday = appData.dagbord?.[toIsoDate(new Date())] || {};
+        const dbBriefing =
+          dbToday.briefing && !dbToday.briefing.deleted && dbToday.briefing.text
+            ? dbToday.briefing
+            : null;
+        const dbRead =
+          !dbBriefing ||
+          dbBriefing.author === loggedInUserName ||
+          (dbToday[`read_${dbSlug(loggedInUserName)}`]?.at || 0) >=
+            (dbBriefing.updatedAt || 0);
+        const dbOpen = Object.values(appData.openPunten || {}).filter(
+          (p) => p && !p.deleted && p.status !== "opgelost"
+        );
+        const dbMine = dbOpen.filter((p) => p.assignee === loggedInUserName);
+        const dbAttention = getDagbordAttention(appData, loggedInUserName);
         return (
           <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden flex flex-col h-full">
             <div className="w-full px-4 py-3 flex items-center gap-2.5 border-b border-gray-100">
@@ -7904,41 +7947,66 @@ const DashboardContent = ({
                 className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0"
                 style={{ backgroundColor: `${primary}1A` }}
               >
-                <BookOpen size={18} style={{ color: primary }} />
+                <LayoutDashboard size={18} style={{ color: primary }} />
               </div>
               <div className="flex-1 min-w-0">
                 <h3 className="text-sm font-bold" style={{ color: C.Lagoon }}>
-                  Overdrachten
+                  Dagbord
                 </h3>
                 <p className="text-xs text-gray-500">
-                  {handoverUnreadCount > 0
-                    ? `${handoverUnreadCount} nog niet gelezen`
-                    : "Alles gelezen ✓"}
+                  {dbOpen.length > 0
+                    ? `${dbOpen.length} open ${dbOpen.length === 1 ? "punt" : "punten"}`
+                    : "Geen open punten"}
                 </p>
               </div>
-              {handoverUnreadCount > 0 && (
+              {dbAttention > 0 && (
                 <span
                   className="px-2.5 py-0.5 rounded-full text-xs font-bold text-white flex-shrink-0"
                   style={{ backgroundColor: primary }}
                 >
-                  {handoverUnreadCount}
+                  {dbAttention}
                 </span>
+              )}
+            </div>
+            <div className="px-4 pt-3 space-y-2">
+              {dbBriefing ? (
+                <div
+                  className="rounded-xl px-3 py-2"
+                  style={{ backgroundColor: dbRead ? "#F9FAFB" : C.PineLight }}
+                >
+                  <p className="text-[11px] font-semibold" style={{ color: C.Pine }}>
+                    Briefing{!dbRead && " · nog niet gelezen"}
+                  </p>
+                  <p className="text-xs text-gray-700 line-clamp-3 whitespace-pre-wrap">
+                    {dbBriefing.text}
+                  </p>
+                </div>
+              ) : (
+                <p className="text-xs text-gray-400 italic">
+                  Nog geen briefing voor vandaag.
+                </p>
+              )}
+              {dbMine.length > 0 && (
+                <p className="text-xs font-semibold" style={{ color: "#B45309" }}>
+                  {dbMine.length} open {dbMine.length === 1 ? "punt staat" : "punten staan"} op jouw naam
+                </p>
               )}
             </div>
             <div className="px-4 pt-2 pb-4 mt-auto">
               <button
                 onClick={() => {
-                  setView("handover");
+                  setView("dagbord");
                   setCurrentDay(new Date());
                 }}
                 className="w-full py-2 rounded-lg font-semibold text-sm flex items-center justify-center gap-1.5 hover:opacity-80"
                 style={{ backgroundColor: `${primary}14`, color: primary }}
               >
-                <Plus size={16} /> Nieuwe overdracht schrijven
+                Open dagbord <ChevronRight size={16} />
               </button>
             </div>
           </div>
         );
+      }
       case "checklist":
         if (userRole !== "fm") return null;
         {
@@ -35346,6 +35414,7 @@ const MobileMenu = ({
   chatCount,
   bingoBadge,
   handoverBadge,
+  dagbordBadge = 0,
   onGoToAdmin,
   appData,
 }) => {
@@ -35357,7 +35426,8 @@ const MobileMenu = ({
         if (action) action();
         else {
           setView(target);
-          if (target === "dashboard") setCurrentDay(new Date());
+          if (target === "dashboard" || target === "dagbord")
+            setCurrentDay(new Date());
           if (target === "schedule") setCurrentDay(getFridayOfWeek(new Date()));
         }
         onClose();
@@ -35409,6 +35479,14 @@ const MobileMenu = ({
           <MenuItem icon={CalendarIcon} label="Programma" target="schedule" />
           {userRole !== "co" && (
             <MenuItem icon={PieChart} label="Bezetting" target="occupancy" />
+          )}
+          {userRole !== "co" && (
+            <MenuItem
+              icon={LayoutDashboard}
+              label="Dagbord"
+              target="dagbord"
+              badge={dagbordBadge}
+            />
           )}
           {userRole !== "co" && (
             <MenuItem
@@ -58010,6 +58088,1468 @@ const CPLogo = ({ color = "#045e51", className = "", style = {} }) => {
 // ── 1 April Grap Overlay ─────────────────────────────────────
 // ── 1 April foto viewer (alleen voor Maik) ───────────────────
 
+// ═══════════════════════════════════════════════════════════════════
+// 🧩 DAGBORD — één dagoverzicht: programma + taken + verslagen +
+// FM-briefing met leesbevestiging + open punten + gesprek van de dag.
+// Oude overdracht-data (appData.handover) wordt alleen-lezen meegetoond.
+//
+// Datamodel (concurrency-safe via DEEP_MERGE_FIELDS):
+//   dagbord[YYYY-MM-DD] = {
+//     briefing:            { text, author, updatedAt }
+//     read_<naam>:         { name, at }                 leesbevestiging briefing
+//     rep_<actId>_<naam>:  { actId, actTitle, author, at, crowd, colleagues,
+//                            notes, songs, bingoQs, quiz, story, finaleQs }
+//     c_<id>:              { id, target, author, text, at, deleted? }
+//   }                      target = "day" | "act:<actId>"
+//   openPunten[id] = { id, title, afdeling, author, createdAt, assignee,
+//                      status: "open"|"opgelost", resolvedBy, resolvedAt,
+//                      deleted?, reacties: { [rid]: { author, text, at } } }
+// ═══════════════════════════════════════════════════════════════════
+
+const DB_AFDELINGEN = [
+  { id: "alle", label: "Alles", bg: C.PineLight, text: C.Pine },
+  { id: "entertainment", label: "Entertainment", bg: C.HoneyLight, text: C.Bark },
+  { id: "crea", label: "Crea", bg: C.SkyLight, text: C.Lagoon },
+  { id: "hotspot", label: "Hotspot", bg: "#FFF4EA", text: "#8A3A00" },
+  { id: "springkussen", label: "Springkussen", bg: C.BlossomLight, text: C.Sunset },
+];
+const dbAfdeling = (id) =>
+  DB_AFDELINGEN.find((a) => a.id === id) || DB_AFDELINGEN[0];
+
+const DB_CROWD = [
+  { label: "Erg rustig", bg: "#DCFCE7", text: "#166534" },
+  { label: "Rustig", bg: "#ECFCCB", text: "#3F6212" },
+  { label: "Normaal", bg: "#FEF9C3", text: "#854D0E" },
+  { label: "Druk", bg: "#FFEDD5", text: "#9A3412" },
+  { label: "Erg druk", bg: "#FEE2E2", text: "#991B1B" },
+];
+
+const dbSlug = (name = "") => String(name).trim().replace(/[^A-Za-z0-9]/g, "_");
+const dbNewId = () =>
+  `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+const dbTime = (ts) =>
+  ts
+    ? new Date(ts).toLocaleTimeString("nl-NL", {
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : "";
+const dbAgo = (ts) => {
+  if (!ts) return "";
+  const d0 = new Date(ts);
+  d0.setHours(0, 0, 0, 0);
+  const d1 = new Date();
+  d1.setHours(0, 0, 0, 0);
+  const days = Math.round((d1 - d0) / 86400000);
+  if (days <= 0) return `vandaag ${dbTime(ts)}`;
+  if (days === 1) return "gisteren";
+  return `${days} dagen geleden`;
+};
+const dbStartMin = (t = "") => {
+  const [h, m] = String(t).split("-")[0].trim().split(":").map(Number);
+  return isNaN(h) ? 9999 : h * 60 + (m || 0);
+};
+const dbActAfdeling = (act) => {
+  const t = (act.type || "").toLowerCase();
+  const title = (act.title || "").toLowerCase();
+  if (t === "crea") return "crea";
+  if (t === "hotspot" || title.includes("hotspot")) return "hotspot";
+  if (t === "springkussen" || title.includes("springkussen"))
+    return "springkussen";
+  return "entertainment";
+};
+const dbActType = (title = "") => {
+  const t = title.toLowerCase();
+  if (t.includes("disco")) return "disco";
+  if (t.includes("bingo") && !t.includes("natuur")) return "bingo";
+  if (t.includes("prize")) return "prizenight";
+  if (t.includes("quiz")) return "quiz";
+  if (t.includes("verhaal") || t.includes("voorlees")) return "verhaal";
+  return "generic";
+};
+const DB_TYPE_FIELD = {
+  disco: { key: "songs", label: "Liedjes gedraaid", multi: true },
+  bingo: { key: "bingoQs", label: "Bingovragen", multi: true },
+  prizenight: { key: "finaleQs", label: "Finalevragen", multi: true },
+  quiz: { key: "quiz", label: "Welke quiz", multi: false },
+  verhaal: { key: "story", label: "Welk verhaal", multi: false },
+};
+const DB_FIELD_LABELS = {
+  songs: "Liedjes",
+  bingoQs: "Bingovragen",
+  finaleQs: "Finale",
+  quiz: "Quiz",
+  story: "Verhaal",
+};
+
+const DbCrowdChip = ({ lvl }) => {
+  const c = DB_CROWD[(lvl || 0) - 1];
+  if (!c) return null;
+  return (
+    <span
+      className="text-[11px] font-semibold px-2 py-0.5 rounded-full"
+      style={{ backgroundColor: c.bg, color: c.text }}
+    >
+      {c.label}
+    </span>
+  );
+};
+
+const DbPill = ({ children, bg, text }) => (
+  <span
+    className="text-[11px] font-semibold px-2 py-0.5 rounded-full whitespace-nowrap"
+    style={{ backgroundColor: bg, color: text }}
+  >
+    {children}
+  </span>
+);
+
+// Reactie-draad (gebruikt bij activiteiten, gesprek van de dag en open punten)
+const DbThread = ({
+  items,
+  staffList,
+  loggedInUserName,
+  onSend,
+  onDelete,
+  placeholder = "Schrijf een reactie… (@naam om te taggen)",
+  emptyText,
+  compact = false,
+}) => {
+  const [text, setText] = useState("");
+  const send = () => {
+    const t = text.trim();
+    if (!t) return;
+    onSend(t);
+    setText("");
+  };
+  return (
+    <div className="space-y-2">
+      {items.length === 0 && emptyText && (
+        <p className="text-xs text-gray-400 italic">{emptyText}</p>
+      )}
+      {items.map((m) => (
+        <div key={m.id} className="flex gap-2 group">
+          <ProfileAvatar
+            name={m.author}
+            staffList={staffList}
+            size={compact ? 22 : 26}
+          />
+          <div className="flex-1 min-w-0">
+            <div className="flex items-baseline gap-2">
+              <span className="text-xs font-semibold" style={{ color: C.Lagoon }}>
+                {m.author}
+              </span>
+              <span className="text-[11px] text-gray-400">{dbAgo(m.at)}</span>
+              {onDelete && m.author === loggedInUserName && (
+                <button
+                  onClick={() => onDelete(m)}
+                  className="ml-auto text-gray-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+                  title="Verwijderen"
+                >
+                  <Trash2 size={12} />
+                </button>
+              )}
+            </div>
+            <p className="text-sm text-gray-700 whitespace-pre-wrap break-words">
+              {highlightMentions(m.text, loggedInUserName)}
+            </p>
+          </div>
+        </div>
+      ))}
+      <div className="flex gap-2 items-end">
+        <div className="flex-1">
+          <MentionTextarea
+            className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#0A7B6A] resize-none bg-white"
+            placeholder={placeholder}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                send();
+              }
+            }}
+            staffList={staffList}
+            loggedInUserName={loggedInUserName}
+          />
+        </div>
+        <button
+          onClick={send}
+          className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 transition-opacity"
+          style={{
+            backgroundColor: C.Pine,
+            color: "white",
+            opacity: text.trim() ? 1 : 0.4,
+          }}
+          title="Versturen"
+        >
+          <Send size={15} />
+        </button>
+      </div>
+    </div>
+  );
+};
+
+// Verslag-formulier per activiteit
+const DbReportForm = ({
+  act,
+  initial,
+  staffList,
+  loggedInUserName,
+  onSave,
+  onCancel,
+}) => {
+  const actType = dbActType(act.title);
+  const typeField = DB_TYPE_FIELD[actType];
+  const [f, setF] = useState(() => ({
+    crowd: initial?.crowd || null,
+    colleagues:
+      initial?.colleagues ??
+      (act.staff || []).filter((n) => n && n !== loggedInUserName).join(", "),
+    notes: initial?.notes || "",
+    songs: initial?.songs || "",
+    bingoQs: initial?.bingoQs || "",
+    quiz: initial?.quiz || "",
+    story: initial?.story || "",
+    finaleQs: initial?.finaleQs || "",
+  }));
+  const [crowdError, setCrowdError] = useState(false);
+  const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
+  const colleagues = (f.colleagues || "").split(", ").filter(Boolean);
+  const save = () => {
+    if (!f.crowd) {
+      setCrowdError(true);
+      return;
+    }
+    onSave(f);
+  };
+  return (
+    <div className="space-y-3 pt-1">
+      <div>
+        <label
+          className="text-xs font-semibold block mb-1"
+          style={{ color: crowdError ? "#DC2626" : C.Lagoon }}
+        >
+          Drukte {crowdError && <span className="font-normal">— kies eerst de drukte</span>}
+        </label>
+        <div className={crowdError ? "ring-2 ring-red-300 rounded-lg" : ""}>
+          <CrowdBar
+            value={f.crowd}
+            onChange={(v) => {
+              set("crowd", v);
+              setCrowdError(false);
+            }}
+            compact
+            type={act.type === "crea" ? "crea" : "ent"}
+          />
+        </div>
+      </div>
+      <div>
+        <label className="text-xs font-semibold block mb-1" style={{ color: C.Lagoon }}>
+          Met wie
+        </label>
+        <div className="flex flex-wrap gap-1.5 items-center">
+          {colleagues.map((n) => (
+            <span
+              key={n}
+              className="flex items-center gap-1 text-xs font-semibold pl-1 pr-2 py-0.5 rounded-full"
+              style={{ backgroundColor: C.PineLight, color: C.Pine }}
+            >
+              <ProfileAvatar name={n} staffList={staffList} size={18} />
+              {n}
+              <button
+                onClick={() =>
+                  set(
+                    "colleagues",
+                    colleagues.filter((x) => x !== n).join(", ")
+                  )
+                }
+                className="opacity-60 hover:opacity-100"
+              >
+                <X size={11} />
+              </button>
+            </span>
+          ))}
+          <StyledSelect
+            className="border border-gray-200 rounded-lg text-xs px-2 py-1 bg-white"
+            value=""
+            onChange={(e) => {
+              const n = e.target.value;
+              if (n && !colleagues.includes(n))
+                set("colleagues", [...colleagues, n].join(", "));
+            }}
+          >
+            <option value="">+ collega</option>
+            {(staffList || [])
+              .filter((s) => !s.inactive && s.name !== loggedInUserName)
+              .sort((a, b) => a.name.localeCompare(b.name))
+              .map((s) => (
+                <option key={s.name} value={s.name}>
+                  {s.name}
+                </option>
+              ))}
+          </StyledSelect>
+        </div>
+      </div>
+      {typeField && (
+        <div>
+          <label className="text-xs font-semibold block mb-1" style={{ color: C.Lagoon }}>
+            {typeField.label}
+          </label>
+          {typeField.multi ? (
+            <textarea
+              rows={3}
+              className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#0A7B6A] resize-y bg-white"
+              value={f[typeField.key]}
+              onChange={(e) => set(typeField.key, e.target.value)}
+            />
+          ) : (
+            <input
+              className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#0A7B6A] bg-white"
+              value={f[typeField.key]}
+              onChange={(e) => set(typeField.key, e.target.value)}
+            />
+          )}
+        </div>
+      )}
+      <div>
+        <label className="text-xs font-semibold block mb-1" style={{ color: C.Lagoon }}>
+          Bijzonderheden
+        </label>
+        <MentionTextarea
+          className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#0A7B6A] resize-none bg-white h-20"
+          placeholder="Hoe ging het? Incidenten, tips voor de volgende keer… (@naam om te taggen)"
+          value={f.notes}
+          onChange={(e) => set("notes", e.target.value)}
+          staffList={staffList}
+          loggedInUserName={loggedInUserName}
+        />
+      </div>
+      <div className="flex gap-2">
+        <button
+          onClick={save}
+          className="flex-1 py-2 rounded-xl text-sm font-semibold text-white flex items-center justify-center gap-1.5"
+          style={{ backgroundColor: C.Pine }}
+        >
+          <Check size={15} /> Verslag opslaan
+        </button>
+        <button
+          onClick={onCancel}
+          className="px-4 py-2 rounded-xl text-sm text-gray-500 bg-gray-100 hover:bg-gray-200"
+        >
+          Annuleren
+        </button>
+      </div>
+    </div>
+  );
+};
+
+const DbReportView = ({ rep, staffList, loggedInUserName, legacy, onEdit }) => (
+  <div className="rounded-xl bg-gray-50 border border-gray-100 p-2.5 space-y-1">
+    <div className="flex items-center gap-2 flex-wrap">
+      <ProfileAvatar name={rep.author} staffList={staffList} size={20} />
+      <span className="text-xs font-semibold" style={{ color: C.Lagoon }}>
+        {rep.author}
+      </span>
+      {rep.colleagues && (
+        <span className="text-[11px] text-gray-400">met {rep.colleagues}</span>
+      )}
+      <DbCrowdChip lvl={rep.crowd} />
+      {legacy && <DbPill bg="#F3F4F6" text="#6B7280">oude overdracht</DbPill>}
+      {onEdit && (
+        <button
+          onClick={onEdit}
+          className="ml-auto text-gray-400 hover:text-[#045E51]"
+          title="Bewerken"
+        >
+          <Edit2 size={13} />
+        </button>
+      )}
+    </div>
+    {Object.entries(DB_FIELD_LABELS).map(([k, label]) =>
+      rep[k] ? (
+        <p key={k} className="text-xs text-gray-700 whitespace-pre-wrap">
+          <span className="font-semibold">{label}:</span> {rep[k]}
+        </p>
+      ) : null
+    )}
+    {rep.notes && (
+      <p className="text-xs text-gray-700 whitespace-pre-wrap">
+        {highlightMentions(rep.notes, loggedInUserName)}
+      </p>
+    )}
+  </div>
+);
+
+// Eén open punt
+const DbPuntItem = ({
+  punt,
+  staffList,
+  loggedInUserName,
+  userRole,
+  onReact,
+  onResolve,
+  onReopen,
+  onAssign,
+  onDelete,
+}) => {
+  const [open, setOpen] = useState(false);
+  const af = dbAfdeling(punt.afdeling);
+  const reacties = Object.entries(punt.reacties || {})
+    .map(([id, r]) => ({ id, ...r }))
+    .filter((r) => !r.deleted)
+    .sort((a, b) => (a.at || 0) - (b.at || 0));
+  const resolved = punt.status === "opgelost";
+  const mine = punt.assignee === loggedInUserName;
+  return (
+    <div
+      className="border-t border-gray-100 first:border-t-0"
+      style={mine && !resolved ? { backgroundColor: `${C.Honey}14` } : undefined}
+    >
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="w-full text-left flex gap-2.5 items-start py-2.5 px-1"
+      >
+        {resolved ? (
+          <CheckCircle size={17} className="mt-0.5 flex-shrink-0" style={{ color: C.Pine }} />
+        ) : (
+          <AlertTriangle size={17} className="mt-0.5 flex-shrink-0" style={{ color: "#B45309" }} />
+        )}
+        <div className="flex-1 min-w-0">
+          <p
+            className={`text-sm font-medium ${resolved ? "line-through text-gray-400" : "text-gray-800"}`}
+          >
+            {punt.title}
+          </p>
+          <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
+            {punt.afdeling && punt.afdeling !== "alle" && (
+              <DbPill bg={af.bg} text={af.text}>{af.label}</DbPill>
+            )}
+            <span className="text-[11px] text-gray-400">
+              {punt.author} · {dbAgo(punt.createdAt)}
+            </span>
+            {punt.assignee && (
+              <span className="text-[11px] font-semibold" style={{ color: mine ? "#B45309" : C.Pine }}>
+                → {mine ? "jij" : punt.assignee}
+              </span>
+            )}
+            {reacties.length > 0 && (
+              <span className="text-[11px] text-gray-400 flex items-center gap-0.5">
+                <MessageCircle size={11} /> {reacties.length}
+              </span>
+            )}
+          </div>
+        </div>
+        {open ? (
+          <ChevronUp size={16} className="text-gray-300 mt-0.5" />
+        ) : (
+          <ChevronDown size={16} className="text-gray-300 mt-0.5" />
+        )}
+      </button>
+      {open && (
+        <div className="pl-8 pr-1 pb-3 space-y-3">
+          {resolved && (
+            <p className="text-xs" style={{ color: C.Pine }}>
+              Opgelost door {punt.resolvedBy} · {dbAgo(punt.resolvedAt)}
+            </p>
+          )}
+          <DbThread
+            compact
+            items={reacties}
+            staffList={staffList}
+            loggedInUserName={loggedInUserName}
+            onSend={onReact}
+            placeholder="Reageer of geef een update…"
+          />
+          <div className="flex flex-wrap gap-2 items-center">
+            {resolved ? (
+              <button
+                onClick={onReopen}
+                className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-gray-100 text-gray-600 hover:bg-gray-200 flex items-center gap-1"
+              >
+                <RotateCcw size={12} /> Heropenen
+              </button>
+            ) : (
+              <button
+                onClick={onResolve}
+                className="text-xs font-semibold px-3 py-1.5 rounded-lg text-white flex items-center gap-1"
+                style={{ backgroundColor: C.Pine }}
+              >
+                <Check size={12} /> Opgelost
+              </button>
+            )}
+            {!resolved && (
+              <StyledSelect
+                className="border border-gray-200 rounded-lg text-xs px-2 py-1.5 bg-white"
+                value={punt.assignee || ""}
+                onChange={(e) => onAssign(e.target.value)}
+              >
+                <option value="">Niemand toegewezen</option>
+                <option value="Maik">Maik</option>
+                {(staffList || [])
+                  .filter((s) => !s.inactive && s.name !== "Maik")
+                  .sort((a, b) => a.name.localeCompare(b.name))
+                  .map((s) => (
+                    <option key={s.name} value={s.name}>
+                      {s.name}
+                    </option>
+                  ))}
+              </StyledSelect>
+            )}
+            {(punt.author === loggedInUserName || userRole === "fm" || userRole === "admin") && (
+              <button
+                onClick={onDelete}
+                className="ml-auto text-xs text-gray-400 hover:text-red-500 flex items-center gap-1"
+              >
+                <Trash2 size={12} /> Verwijderen
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const DbCard = ({ icon: Icon, title, subtitle, right, children, accent = C.Pine, className = "" }) => (
+  <div className={`bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden ${className}`}>
+    <div className="px-4 py-3 flex items-center gap-2.5 border-b border-gray-100">
+      <div
+        className="w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0"
+        style={{ backgroundColor: `${accent}1A` }}
+      >
+        <Icon size={16} style={{ color: accent }} />
+      </div>
+      <div className="flex-1 min-w-0">
+        <h3 className="text-sm font-bold" style={{ color: C.Lagoon }}>
+          {title}
+        </h3>
+        {subtitle && <p className="text-xs text-gray-500">{subtitle}</p>}
+      </div>
+      {right}
+    </div>
+    <div className="px-4 py-3">{children}</div>
+  </div>
+);
+
+// Telt wat de ingelogde gebruiker op het dagbord nog moet zien
+const getDagbordAttention = (appData, loggedInUserName) => {
+  if (!loggedInUserName) return 0;
+  const today = toIsoDate(new Date());
+  const day = appData?.dagbord?.[today] || {};
+  let n = 0;
+  const b = day.briefing;
+  if (b && b.text && !b.deleted && b.author !== loggedInUserName) {
+    const r = day[`read_${dbSlug(loggedInUserName)}`];
+    if (!r || (r.at || 0) < (b.updatedAt || 0)) n++;
+  }
+  for (const p of Object.values(appData?.openPunten || {})) {
+    if (p && !p.deleted && p.status !== "opgelost" && p.assignee === loggedInUserName)
+      n++;
+  }
+  return n;
+};
+
+const DagbordView = ({
+  currentDay,
+  appData,
+  updateData,
+  loggedInUserName,
+  userRole,
+  getDailyTasks,
+  onCheckTask,
+  onNvtTask,
+}) => {
+  const dateKey = toIsoDate(currentDay);
+  const todayKey = toIsoDate(new Date());
+  const isToday = dateKey === todayKey;
+  const isPastDay = dateKey < todayKey;
+  const staffList = appData.staffList || [];
+  const day = appData.dagbord?.[dateKey] || {};
+  const isFM = userRole === "fm" || userRole === "admin";
+  const me = loggedInUserName;
+
+  const [afdeling, setAfdeling] = useState(() => {
+    try {
+      return localStorage.getItem(`cp_dagbord_afd_${me}`) || "alle";
+    } catch (e) {
+      return "alle";
+    }
+  });
+  const chooseAfdeling = (id) => {
+    setAfdeling(id);
+    try {
+      localStorage.setItem(`cp_dagbord_afd_${me}`, id);
+    } catch (e) {}
+  };
+  const matchAfd = (a) => afdeling === "alle" || !a || a === "alle" || a === afdeling;
+
+  const [openAct, setOpenAct] = useState(null); // actId dat uitgeklapt is
+  const [editingRep, setEditingRep] = useState(null); // actId waarvoor formulier open is
+  const [editingBriefing, setEditingBriefing] = useState(false);
+  const [briefingDraft, setBriefingDraft] = useState("");
+  const [showResolved, setShowResolved] = useState(false);
+  const [showLegacy, setShowLegacy] = useState(false);
+  const [newPunt, setNewPunt] = useState(null); // { title, afdeling, assignee, note }
+
+  useEffect(() => {
+    setOpenAct(null);
+    setEditingRep(null);
+    setEditingBriefing(false);
+  }, [dateKey]);
+
+  // ── Opslaan-helpers ────────────────────────────────────────────────
+  const mentionNotifs = (text, label) => {
+    const names = extractMentions(text, staffList).filter((n) => n !== me);
+    return names.map((name) => ({
+      id: `mention_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+      type: "mention",
+      mentionedUser: name,
+      author: me,
+      source: "dagbord",
+      sourceLabel: label,
+      dateKey,
+      text: text.length > 120 ? text.slice(0, 117) + "…" : text,
+      createdAt: new Date().toISOString(),
+      readBy: [],
+    }));
+  };
+  const save = (dayDelta, punten, notifs = []) => {
+    const updates = {};
+    if (dayDelta) updates.dagbord = { [dateKey]: dayDelta };
+    if (punten) updates.openPunten = punten;
+    if (notifs.length > 0)
+      updates.notifications = [...(appData.notifications || []), ...notifs];
+    updateData(updates);
+  };
+
+  // ── Data voor deze dag ─────────────────────────────────────────────
+  const activities = (appData.schedule || [])
+    .filter((a) => a.date === dateKey)
+    .sort((a, b) => dbStartMin(a.time) - dbStartMin(b.time));
+
+  const comments = Object.entries(day)
+    .filter(([k, v]) => k.startsWith("c_") && v && !v.deleted)
+    .map(([, v]) => v)
+    .sort((a, b) => (a.at || 0) - (b.at || 0));
+  const commentsFor = (target) => comments.filter((c) => c.target === target);
+
+  const newReports = Object.entries(day)
+    .filter(([k, v]) => k.startsWith("rep_") && v && !v.deleted)
+    .map(([key, v]) => ({ ...v, _key: key }));
+
+  // Oude overdracht (alleen-lezen)
+  const legacyDay = appData.handover?.[dateKey] || {};
+  const legacyArr = (k) => (Array.isArray(legacyDay[k]) ? legacyDay[k] : []);
+  const legacyReportsFor = (actId) => {
+    const out = [];
+    for (const k of ["ent", "crea"]) {
+      for (const e of legacyArr(k)) {
+        const af = e?.actFields?.[String(actId)];
+        if (af) out.push({ ...af, author: af.author || e.author, colleagues: af.colleagues || "" });
+      }
+    }
+    return out;
+  };
+  const reportsFor = (actId) => ({
+    nieuw: newReports.filter((r) => String(r.actId) === String(actId)),
+    oud: legacyReportsFor(actId),
+  });
+  const actIds = new Set(activities.map((a) => String(a.id)));
+  const LEGACY_TABS = [
+    { key: "fm", label: "FM" },
+    { key: "ent", label: "Entertainment" },
+    { key: "crea", label: "Crea" },
+    { key: "springkussen", label: "Springkussen" },
+    { key: "hotspot", label: "Hotspot" },
+  ];
+  const legacyItems = [];
+  for (const t of LEGACY_TABS) {
+    const raw = legacyDay[t.key];
+    if (typeof raw === "string" && raw.trim()) {
+      legacyItems.push({ id: `str_${t.key}`, tab: t.label, author: "Archief", text: raw });
+      continue;
+    }
+    for (const e of legacyArr(t.key)) {
+      if (!e) continue;
+      const orphanActs = Object.entries(e.actFields || {}).filter(([id]) => !actIds.has(id));
+      const text = [e.text, e.extraNotes || e.remarks].filter(Boolean).join("\n");
+      if (!text && orphanActs.length === 0 && !(e.creaActs || []).length && !(e.photos || []).length)
+        continue;
+      legacyItems.push({
+        id: `${t.key}_${e.id}`,
+        tab: t.label,
+        author: e.author || "Archief",
+        time: e.time,
+        text,
+        orphanActs,
+        creaActs: e.creaActs || [],
+        photos: e.photos || [],
+        fmRemark: e.fmRemark,
+      });
+    }
+  }
+
+  // Wie werkt er vandaag
+  const workingNames = new Set();
+  (appData.roosterDiensten?.[dateKey] || []).forEach((d) =>
+    (d.assigned || []).forEach((n) => n && workingNames.add(n))
+  );
+  (appData.workSchedule?.[dateKey] || []).forEach((s) => {
+    if (s.matchedUser) workingNames.add(s.matchedUser);
+  });
+
+  // Taken
+  const TASK_TYPES = [
+    { type: "entertainment", afd: "entertainment" },
+    { type: "crea", afd: "crea" },
+    { type: "hotspot", afd: "hotspot" },
+    { type: "extra", afd: "alle" },
+  ];
+  const allTasks = TASK_TYPES.flatMap(({ type, afd }) =>
+    (getDailyTasks ? getDailyTasks(type) : []).map((t) => ({ ...t, _afd: afd }))
+  ).filter((t) => matchAfd(t._afd));
+  const phaseOf = (t) =>
+    t.category === "startup" ? "opstart" : t.category === "closing" ? "afsluiting" : "gedurende";
+  const tasksIn = (ph) => allTasks.filter((t) => phaseOf(t) === ph);
+  const countable = allTasks.filter((t) => !t.nvt);
+  const tasksDone = countable.filter((t) => t.done).length;
+
+  const visibleActs = activities.filter((a) => matchAfd(dbActAfdeling(a)));
+  const actsDue = visibleActs.filter(
+    (a) => isPastDay || (isToday && isActivityPast(a.time, currentDay))
+  );
+  const actsWithReport = actsDue.filter((a) => {
+    const r = reportsFor(a.id);
+    return r.nieuw.length + r.oud.length > 0;
+  });
+
+  // Open punten
+  const allPunten = Object.values(appData.openPunten || {}).filter((p) => p && p.id && !p.deleted);
+  const openPunten = allPunten
+    .filter((p) => p.status !== "opgelost" && matchAfd(p.afdeling))
+    .sort((a, b) => {
+      const ma = a.assignee === me ? 0 : 1;
+      const mb = b.assignee === me ? 0 : 1;
+      if (ma !== mb) return ma - mb;
+      return (b.createdAt || 0) - (a.createdAt || 0);
+    });
+  const resolvedPunten = allPunten
+    .filter(
+      (p) =>
+        p.status === "opgelost" &&
+        matchAfd(p.afdeling) &&
+        Date.now() - (p.resolvedAt || 0) < 14 * 86400000
+    )
+    .sort((a, b) => (b.resolvedAt || 0) - (a.resolvedAt || 0));
+
+  // Briefing
+  const briefing = day.briefing && !day.briefing.deleted && day.briefing.text ? day.briefing : null;
+  const readers = Object.entries(day)
+    .filter(([k, v]) => k.startsWith("read_") && v && briefing && (v.at || 0) >= (briefing.updatedAt || 0))
+    .map(([, v]) => v.name);
+  const iHaveRead = !briefing || briefing.author === me || readers.includes(me);
+  const notYetRead = [...workingNames].filter(
+    (n) => n !== briefing?.author && !readers.includes(n)
+  );
+
+  // ── Acties ─────────────────────────────────────────────────────────
+  const saveBriefing = () => {
+    const text = briefingDraft.trim();
+    save(
+      { briefing: { text, author: me, updatedAt: Date.now(), deleted: !text } },
+      null,
+      text ? mentionNotifs(text, "FM-briefing") : []
+    );
+    setEditingBriefing(false);
+  };
+  const markRead = () =>
+    save({ [`read_${dbSlug(me)}`]: { name: me, at: Date.now() } });
+
+  const addComment = (target, text, label) => {
+    const id = dbNewId();
+    save(
+      { [`c_${id}`]: { id, target, author: me, text, at: Date.now() } },
+      null,
+      mentionNotifs(text, label)
+    );
+  };
+  const deleteComment = (c) => save({ [`c_${c.id}`]: { deleted: true } });
+
+  const saveReport = (act, f) => {
+    const key = `rep_${dbSlug(act.id)}_${dbSlug(me)}`;
+    const existing = day[key];
+    save(
+      {
+        [key]: {
+          ...f,
+          actId: String(act.id),
+          actTitle: act.title,
+          author: me,
+          at: existing?.at || Date.now(),
+          updatedAt: Date.now(),
+          deleted: false,
+        },
+      },
+      null,
+      mentionNotifs(f.notes || "", `Verslag ${act.title}`)
+    );
+    setEditingRep(null);
+    cpToast("Verslag opgeslagen", "success");
+  };
+
+  const createPunt = () => {
+    const title = (newPunt?.title || "").trim();
+    if (!title) return;
+    const id = dbNewId();
+    const now = Date.now();
+    const reacties = {};
+    const note = (newPunt.note || "").trim();
+    if (note) reacties[dbNewId()] = { author: me, text: note, at: now };
+    const notifs = mentionNotifs(`${title} ${note}`, "Open punt");
+    if (newPunt.assignee && newPunt.assignee !== me && !notifs.some((n) => n.mentionedUser === newPunt.assignee)) {
+      notifs.push({
+        id: `mention_${now}_${Math.random().toString(36).slice(2)}`,
+        type: "mention",
+        mentionedUser: newPunt.assignee,
+        author: me,
+        source: "dagbord",
+        sourceLabel: "Open punt voor jou",
+        dateKey,
+        text: title,
+        createdAt: new Date().toISOString(),
+        readBy: [],
+      });
+    }
+    save(
+      null,
+      {
+        [id]: {
+          id,
+          title,
+          afdeling: newPunt.afdeling || "alle",
+          author: me,
+          createdAt: now,
+          assignee: newPunt.assignee || "",
+          status: "open",
+          reacties,
+        },
+      },
+      notifs
+    );
+    setNewPunt(null);
+  };
+  const reactPunt = (p, text) => {
+    const rid = dbNewId();
+    save(null, { [p.id]: { reacties: { [rid]: { author: me, text, at: Date.now() } } } }, mentionNotifs(text, `Open punt: ${p.title}`));
+  };
+  const resolvePunt = (p) =>
+    save(null, { [p.id]: { status: "opgelost", resolvedBy: me, resolvedAt: Date.now() } });
+  const reopenPunt = (p) =>
+    save(null, { [p.id]: { status: "open", resolvedBy: "", resolvedAt: 0 } });
+  const assignPunt = (p, name) => {
+    const notifs =
+      name && name !== me
+        ? [
+            {
+              id: `mention_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+              type: "mention",
+              mentionedUser: name,
+              author: me,
+              source: "dagbord",
+              sourceLabel: "Open punt voor jou",
+              dateKey,
+              text: p.title,
+              createdAt: new Date().toISOString(),
+              readBy: [],
+            },
+          ]
+        : [];
+    save(null, { [p.id]: { assignee: name } }, notifs);
+  };
+  const deletePunt = (p) => {
+    if (!window.confirm(`"${p.title}" verwijderen?`)) return;
+    save(null, { [p.id]: { deleted: true } });
+  };
+
+  // ── Weergave-blokken ───────────────────────────────────────────────
+  const renderTask = (t) => {
+    const af = dbAfdeling(t._afd);
+    return (
+      <div key={`${t.type}_${t.id}`} className="flex items-center gap-2.5 py-1.5">
+        <button
+          onClick={() => onCheckTask && onCheckTask(t)}
+          className="w-5 h-5 rounded-md border-2 flex items-center justify-center flex-shrink-0 transition-colors"
+          style={{
+            borderColor: t.done ? C.Pine : t.nvt ? "#D1D5DB" : "#9CA3AF",
+            backgroundColor: t.done ? C.Pine : "white",
+          }}
+          title={t.done ? "Niet meer afgevinkt" : "Afvinken"}
+        >
+          {t.done && <Check size={13} color="white" strokeWidth={3} />}
+        </button>
+        <div className="flex-1 min-w-0">
+          <p
+            className={`text-sm ${t.done || t.nvt ? "line-through text-gray-400" : "text-gray-800"}`}
+          >
+            {t.text}
+          </p>
+          {(t.done && t.doneBy) || t.nvt ? (
+            <p className="text-[11px] text-gray-400">
+              {t.nvt ? "n.v.t." : `${t.doneBy}${t.doneAt ? ` · ${dbTime(t.doneAt)}` : ""}`}
+            </p>
+          ) : null}
+        </div>
+        {afdeling === "alle" && t._afd !== "alle" && (
+          <DbPill bg={af.bg} text={af.text}>{af.label}</DbPill>
+        )}
+        {!t.done && onNvtTask && (
+          <button
+            onClick={() => onNvtTask(t)}
+            className="text-[11px] text-gray-300 hover:text-gray-500"
+            title="Niet van toepassing"
+          >
+            n.v.t.
+          </button>
+        )}
+      </div>
+    );
+  };
+
+  const renderTaskBlock = (phase, label, Icon) => {
+    const list = tasksIn(phase);
+    if (list.length === 0) return null;
+    const done = list.filter((t) => t.done || t.nvt).length;
+    return (
+      <div className="flex gap-3">
+        <div className="w-12 flex-shrink-0 pt-3 text-right">
+          <Icon size={16} className="inline text-gray-400" />
+        </div>
+        <div className="flex-1 min-w-0 rounded-xl border border-gray-100 bg-gray-50/60 px-3 py-2 my-1">
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-bold" style={{ color: C.Lagoon }}>
+              {label}
+            </p>
+            <DbPill
+              bg={done === list.length ? C.GrassLight : "#F3F4F6"}
+              text={done === list.length ? C.Pine : "#6B7280"}
+            >
+              {done}/{list.length}
+            </DbPill>
+          </div>
+          {list.map((t) => renderTask(t))}
+        </div>
+      </div>
+    );
+  };
+
+  const renderActivity = (act) => {
+    const id = String(act.id);
+    const reps = reportsFor(act.id);
+    const nReps = reps.nieuw.length + reps.oud.length;
+    const thread = commentsFor(`act:${id}`);
+    const now = isActivityNow(act.time, currentDay);
+    const past = isPastDay || (isToday && isActivityPast(act.time, currentDay));
+    const afd = dbAfdeling(dbActAfdeling(act));
+    const expanded = openAct === id;
+    const myRep = reps.nieuw.find((r) => r.author === me);
+    let status;
+    if (nReps > 0) status = <DbPill bg={C.GrassLight} text={C.Pine}>verslag ✓</DbPill>;
+    else if (now) status = <DbPill bg={C.HoneyLight} text={C.Bark}>nu bezig</DbPill>;
+    else if (past) status = <DbPill bg="#FEE2E2" text="#991B1B">verslag ontbreekt</DbPill>;
+    else status = <DbPill bg="#F3F4F6" text="#6B7280">straks</DbPill>;
+    return (
+      <div key={act.id} className="flex gap-3">
+        <div className="w-12 flex-shrink-0 pt-3 text-right">
+          <span className={`text-xs font-semibold ${now ? "" : "text-gray-400"}`} style={now ? { color: C.Pine } : undefined}>
+            {(act.time || "").split("-")[0].trim()}
+          </span>
+        </div>
+        <div
+          className="flex-1 min-w-0 rounded-xl border px-3 py-2 my-1 bg-white"
+          style={{ borderColor: now ? C.Pine : "#F3F4F6", borderLeftWidth: 4, borderLeftColor: afd.text }}
+        >
+          <button
+            onClick={() => setOpenAct(expanded ? null : id)}
+            className="w-full text-left flex items-start gap-2"
+          >
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold text-gray-800">{act.title}</p>
+              <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
+                {act.loc && (
+                  <span className="text-[11px] text-gray-400 flex items-center gap-0.5">
+                    <MapPin size={10} /> {act.loc}
+                  </span>
+                )}
+                {(act.staff || []).slice(0, 4).map((n) => (
+                  <ProfileAvatar key={n} name={n} staffList={staffList} size={18} />
+                ))}
+                {thread.length > 0 && (
+                  <span className="text-[11px] text-gray-400 flex items-center gap-0.5">
+                    <MessageCircle size={11} /> {thread.length}
+                  </span>
+                )}
+              </div>
+            </div>
+            {status}
+          </button>
+          {expanded && (
+            <div className="mt-3 space-y-3 border-t border-gray-100 pt-3">
+              {reps.oud.map((r, i) => (
+                <DbReportView key={`o${i}`} rep={r} legacy staffList={staffList} loggedInUserName={me} />
+              ))}
+              {reps.nieuw.map((r) =>
+                editingRep === id && r.author === me ? null : (
+                  <DbReportView
+                    key={r._key}
+                    rep={r}
+                    staffList={staffList}
+                    loggedInUserName={me}
+                    onEdit={r.author === me ? () => setEditingRep(id) : null}
+                  />
+                )
+              )}
+              {editingRep === id ? (
+                <DbReportForm
+                  act={act}
+                  initial={myRep}
+                  staffList={staffList}
+                  loggedInUserName={me}
+                  onSave={(f) => saveReport(act, f)}
+                  onCancel={() => setEditingRep(null)}
+                />
+              ) : (
+                !myRep && (
+                  <button
+                    onClick={() => setEditingRep(id)}
+                    className="w-full py-2 rounded-xl text-sm font-semibold flex items-center justify-center gap-1.5"
+                    style={{ backgroundColor: `${C.Pine}12`, color: C.Pine }}
+                  >
+                    <Plus size={15} /> Verslag schrijven
+                  </button>
+                )
+              )}
+              <div>
+                <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wide mb-1.5">
+                  Reacties
+                </p>
+                <DbThread
+                  compact
+                  items={thread}
+                  staffList={staffList}
+                  loggedInUserName={me}
+                  onSend={(t) => addComment(`act:${id}`, t, act.title)}
+                  onDelete={deleteComment}
+                  placeholder="Vraag of opmerking over deze activiteit…"
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const hasAnything = visibleActs.length + allTasks.length > 0;
+
+  return (
+    <div className="space-y-4">
+      {/* Samenvatting + afdelingsfilter */}
+      <div className="flex flex-wrap items-center gap-2 justify-between">
+        <div className="flex flex-wrap gap-1.5">
+          {DB_AFDELINGEN.map((a) => (
+            <button
+              key={a.id}
+              onClick={() => chooseAfdeling(a.id)}
+              className="text-xs font-semibold px-3 py-1.5 rounded-full border transition-colors"
+              style={
+                afdeling === a.id
+                  ? { backgroundColor: a.text, color: "white", borderColor: a.text }
+                  : { backgroundColor: "white", color: a.text, borderColor: `${a.text}33` }
+              }
+            >
+              {a.label}
+            </button>
+          ))}
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {countable.length > 0 && (
+            <DbPill
+              bg={tasksDone === countable.length ? C.GrassLight : "#F3F4F6"}
+              text={tasksDone === countable.length ? C.Pine : "#374151"}
+            >
+              {tasksDone}/{countable.length} taken
+            </DbPill>
+          )}
+          {actsDue.length > 0 && (
+            <DbPill
+              bg={actsWithReport.length === actsDue.length ? C.GrassLight : "#FEF3C7"}
+              text={actsWithReport.length === actsDue.length ? C.Pine : "#92400E"}
+            >
+              {actsWithReport.length}/{actsDue.length} verslagen
+            </DbPill>
+          )}
+          {openPunten.length > 0 && (
+            <DbPill bg="#FEF3C7" text="#92400E">
+              {openPunten.length} open {openPunten.length === 1 ? "punt" : "punten"}
+            </DbPill>
+          )}
+        </div>
+      </div>
+
+      {/* FM-briefing */}
+      <div
+        className="rounded-2xl border overflow-hidden"
+        style={{ backgroundColor: briefing ? C.PineLight : "white", borderColor: briefing ? `${C.Pine}40` : "#F3F4F6" }}
+      >
+        <div className="px-4 py-3 flex items-start gap-3">
+          <Megaphone size={18} className="mt-0.5 flex-shrink-0" style={{ color: C.Pine }} />
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <p className="text-sm font-bold" style={{ color: C.Pine }}>
+                Briefing van de dag
+              </p>
+              {briefing && (
+                <span className="text-[11px] text-gray-500">
+                  {briefing.author} · {dbAgo(briefing.updatedAt)}
+                </span>
+              )}
+              {isFM && !editingBriefing && (
+                <button
+                  onClick={() => {
+                    setBriefingDraft(briefing?.text || "");
+                    setEditingBriefing(true);
+                  }}
+                  className="ml-auto text-xs font-semibold flex items-center gap-1 px-2.5 py-1 rounded-lg"
+                  style={{ backgroundColor: "white", color: C.Pine }}
+                >
+                  {briefing ? <Edit2 size={12} /> : <Plus size={12} />}
+                  {briefing ? "Bewerken" : "Briefing schrijven"}
+                </button>
+              )}
+            </div>
+            {editingBriefing ? (
+              <div className="mt-2 space-y-2">
+                <MentionTextarea
+                  className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#0A7B6A] resize-none bg-white h-28"
+                  placeholder="Wat moet iedereen vandaag weten? Bijzonderheden, wijzigingen, aandachtspunten… (@naam of @team)"
+                  value={briefingDraft}
+                  onChange={(e) => setBriefingDraft(e.target.value)}
+                  autoFocus
+                  staffList={staffList}
+                  loggedInUserName={me}
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={saveBriefing}
+                    className="px-4 py-1.5 rounded-lg text-sm font-semibold text-white"
+                    style={{ backgroundColor: C.Pine }}
+                  >
+                    Publiceren
+                  </button>
+                  <button
+                    onClick={() => setEditingBriefing(false)}
+                    className="px-4 py-1.5 rounded-lg text-sm text-gray-500 bg-white"
+                  >
+                    Annuleren
+                  </button>
+                </div>
+                <p className="text-[11px] text-gray-500">
+                  Na het publiceren moet iedereen de briefing opnieuw als gelezen markeren.
+                </p>
+              </div>
+            ) : briefing ? (
+              <>
+                <p className="text-sm text-gray-800 whitespace-pre-wrap mt-1">
+                  {highlightMentions(briefing.text, me)}
+                </p>
+                <div className="flex items-center gap-2 flex-wrap mt-2.5">
+                  {!iHaveRead && (
+                    <button
+                      onClick={markRead}
+                      className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white flex items-center gap-1"
+                      style={{ backgroundColor: C.Pine }}
+                    >
+                      <Eye size={13} /> Gelezen
+                    </button>
+                  )}
+                  <div className="flex -space-x-1.5">
+                    {readers.slice(0, 8).map((n) => (
+                      <div key={n} className="rounded-full ring-2 ring-white" title={n}>
+                        <ProfileAvatar name={n} staffList={staffList} size={22} />
+                      </div>
+                    ))}
+                  </div>
+                  <span className="text-[11px] text-gray-500">
+                    {readers.length === 0
+                      ? "Nog door niemand gelezen"
+                      : `Gelezen door ${readers.length}${workingNames.size ? ` van ${[...workingNames].filter((n) => n !== briefing.author).length}` : ""}`}
+                  </span>
+                  {isFM && notYetRead.length > 0 && (
+                    <span className="text-[11px] font-semibold" style={{ color: "#B45309" }}>
+                      Nog niet: {notYetRead.join(", ")}
+                    </span>
+                  )}
+                </div>
+              </>
+            ) : (
+              <p className="text-xs text-gray-500 mt-0.5">
+                {isFM
+                  ? "Nog geen briefing voor deze dag. Schrijf kort wat iedereen moet weten."
+                  : "Er is nog geen briefing voor deze dag."}
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)] gap-4 items-start">
+        {/* Tijdlijn */}
+        <DbCard
+          icon={Clock}
+          title="Dagplanning"
+          subtitle="Programma, taken en verslagen op één plek"
+        >
+          {!hasAnything && (
+            <p className="text-sm text-gray-400 italic py-4 text-center">
+              Geen programma of taken voor deze dag{afdeling !== "alle" ? " in deze afdeling" : ""}.
+            </p>
+          )}
+          {renderTaskBlock("opstart", "Opstarten", Sun)}
+          {visibleActs.map((act) => renderActivity(act))}
+          {renderTaskBlock("gedurende", "Gedurende de dag", ClipboardList)}
+          {renderTaskBlock("afsluiting", "Afsluiten", Moon)}
+        </DbCard>
+
+        <div className="space-y-4">
+          {/* Open punten */}
+          <DbCard
+            icon={AlertTriangle}
+            accent="#B45309"
+            title="Open punten"
+            subtitle="Blijven staan tot iemand ze oplost"
+            right={
+              !newPunt && (
+                <button
+                  onClick={() =>
+                    setNewPunt({ title: "", afdeling: afdeling, assignee: "", note: "" })
+                  }
+                  className="text-xs font-semibold px-2.5 py-1.5 rounded-lg flex items-center gap-1"
+                  style={{ backgroundColor: `${C.Pine}12`, color: C.Pine }}
+                >
+                  <Plus size={13} /> Nieuw
+                </button>
+              )
+            }
+          >
+            {newPunt && (
+              <div className="rounded-xl border border-gray-200 p-3 mb-3 space-y-2 bg-gray-50">
+                <input
+                  autoFocus
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#0A7B6A] bg-white"
+                  placeholder="Wat speelt er? Bv. microfoon 2 kraakt"
+                  value={newPunt.title}
+                  onChange={(e) => setNewPunt({ ...newPunt, title: e.target.value })}
+                  onKeyDown={(e) => e.key === "Enter" && createPunt()}
+                />
+                <div className="grid grid-cols-2 gap-2">
+                  <StyledSelect
+                    className="border border-gray-200 rounded-lg text-xs px-2 py-1.5 bg-white"
+                    value={newPunt.afdeling}
+                    onChange={(e) => setNewPunt({ ...newPunt, afdeling: e.target.value })}
+                  >
+                    {DB_AFDELINGEN.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.id === "alle" ? "Hele team" : a.label}
+                      </option>
+                    ))}
+                  </StyledSelect>
+                  <StyledSelect
+                    className="border border-gray-200 rounded-lg text-xs px-2 py-1.5 bg-white"
+                    value={newPunt.assignee}
+                    onChange={(e) => setNewPunt({ ...newPunt, assignee: e.target.value })}
+                  >
+                    <option value="">Niemand toewijzen</option>
+                    <option value="Maik">Maik</option>
+                    {staffList
+                      .filter((s) => !s.inactive && s.name !== "Maik")
+                      .sort((a, b) => a.name.localeCompare(b.name))
+                      .map((s) => (
+                        <option key={s.name} value={s.name}>
+                          {s.name}
+                        </option>
+                      ))}
+                  </StyledSelect>
+                </div>
+                <MentionTextarea
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#0A7B6A] resize-none bg-white h-16"
+                  placeholder="Toelichting (optioneel)"
+                  value={newPunt.note}
+                  onChange={(e) => setNewPunt({ ...newPunt, note: e.target.value })}
+                  staffList={staffList}
+                  loggedInUserName={me}
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={createPunt}
+                    className="flex-1 py-1.5 rounded-lg text-sm font-semibold text-white"
+                    style={{ backgroundColor: C.Pine, opacity: newPunt.title.trim() ? 1 : 0.5 }}
+                  >
+                    Toevoegen
+                  </button>
+                  <button
+                    onClick={() => setNewPunt(null)}
+                    className="px-3 py-1.5 rounded-lg text-sm text-gray-500 bg-white border border-gray-200"
+                  >
+                    Annuleren
+                  </button>
+                </div>
+              </div>
+            )}
+            {openPunten.length === 0 && !newPunt && (
+              <p className="text-xs text-gray-400 italic py-1">
+                Geen open punten. Loopt er iets? Zet het hier, dan raakt het niet kwijt.
+              </p>
+            )}
+            {openPunten.map((p) => (
+              <DbPuntItem
+                key={p.id}
+                punt={p}
+                staffList={staffList}
+                loggedInUserName={me}
+                userRole={userRole}
+                onReact={(t) => reactPunt(p, t)}
+                onResolve={() => resolvePunt(p)}
+                onReopen={() => reopenPunt(p)}
+                onAssign={(n) => assignPunt(p, n)}
+                onDelete={() => deletePunt(p)}
+              />
+            ))}
+            {resolvedPunten.length > 0 && (
+              <div className="mt-2 pt-2 border-t border-gray-100">
+                <button
+                  onClick={() => setShowResolved((s) => !s)}
+                  className="text-xs font-semibold text-gray-400 hover:text-gray-600 flex items-center gap-1"
+                >
+                  {showResolved ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                  Opgelost, laatste 2 weken ({resolvedPunten.length})
+                </button>
+                {showResolved &&
+                  resolvedPunten.map((p) => (
+                    <DbPuntItem
+                      key={p.id}
+                      punt={p}
+                      staffList={staffList}
+                      loggedInUserName={me}
+                      userRole={userRole}
+                      onReact={(t) => reactPunt(p, t)}
+                      onResolve={() => resolvePunt(p)}
+                      onReopen={() => reopenPunt(p)}
+                      onAssign={(n) => assignPunt(p, n)}
+                      onDelete={() => deletePunt(p)}
+                    />
+                  ))}
+              </div>
+            )}
+          </DbCard>
+
+          {/* Gesprek van de dag */}
+          <DbCard
+            icon={MessageCircle}
+            title="Gesprek van de dag"
+            subtitle="Korte afstemming met het hele team"
+          >
+            <DbThread
+              items={commentsFor("day")}
+              staffList={staffList}
+              loggedInUserName={me}
+              onSend={(t) => addComment("day", t, "Gesprek van de dag")}
+              onDelete={deleteComment}
+              emptyText="Nog niets gedeeld vandaag."
+              placeholder="Deel iets met het team… (@naam of @team)"
+            />
+          </DbCard>
+
+          {/* Oude overdracht */}
+          {legacyItems.length > 0 && (
+            <DbCard
+              icon={History}
+              accent="#6B7280"
+              title="Overdracht (oud systeem)"
+              subtitle={`${legacyItems.length} ${legacyItems.length === 1 ? "bericht" : "berichten"} · alleen lezen`}
+              right={
+                <button
+                  onClick={() => setShowLegacy((s) => !s)}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  {showLegacy ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                </button>
+              }
+            >
+              {!showLegacy ? (
+                <button
+                  onClick={() => setShowLegacy(true)}
+                  className="text-xs font-semibold"
+                  style={{ color: C.Pine }}
+                >
+                  Toon berichten
+                </button>
+              ) : (
+                <div className="space-y-3">
+                  {legacyItems.map((e) => (
+                    <div key={e.id} className="border-t border-gray-100 first:border-t-0 pt-2 first:pt-0">
+                      <div className="flex items-center gap-2">
+                        <ProfileAvatar name={e.author} staffList={staffList} size={20} />
+                        <span className="text-xs font-semibold" style={{ color: C.Lagoon }}>
+                          {e.author}
+                        </span>
+                        <DbPill bg="#F3F4F6" text="#6B7280">{e.tab}</DbPill>
+                        {e.time && <span className="text-[11px] text-gray-400">{e.time}</span>}
+                      </div>
+                      {e.text && (
+                        <p className="text-sm text-gray-700 whitespace-pre-wrap mt-1">
+                          {highlightMentions(e.text, me)}
+                        </p>
+                      )}
+                      {(e.orphanActs || []).map(([aid, af]) => (
+                        <div key={aid} className="mt-1.5">
+                          <DbReportView rep={{ ...af, author: af.author || e.author }} legacy staffList={staffList} loggedInUserName={me} />
+                        </div>
+                      ))}
+                      {(e.creaActs || []).map((ca, i) => (
+                        <p key={i} className="text-xs text-gray-600 mt-1">
+                          <span className="font-semibold">{ca.name}</span>
+                          {ca.notes ? ` — ${ca.notes}` : ""}
+                        </p>
+                      ))}
+                      {e.photos.length > 0 && (
+                        <div className="flex gap-1.5 mt-1.5 flex-wrap">
+                          {e.photos.map((ph, i) =>
+                            ph?.url ? (
+                              <a key={i} href={ph.url} target="_blank" rel="noreferrer">
+                                <img src={ph.url} alt="" loading="lazy" className="w-14 h-14 object-cover rounded-lg border" />
+                              </a>
+                            ) : null
+                          )}
+                        </div>
+                      )}
+                      {e.fmRemark && (
+                        <p className="text-xs mt-1 px-2 py-1 rounded bg-yellow-50 text-yellow-900">
+                          FM: {e.fmRemark}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </DbCard>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 function AppInner() {
   useEffect(() => {
     if (!document.getElementById("tailwind-script")) {
@@ -59962,9 +61502,11 @@ function AppInner() {
           !Array.isArray(pendingVal) &&
           !Array.isArray(newVal)
         ) {
-          // handover/timeClock: 2-niveau merge (datum → type/persoon) zodat een
-          // delta de al-gequeuede entries van dezelfde dag niet wegvaagt
-          if (key === "handover" || key === "timeClock") {
+          if (DEEP_MERGE_FIELDS.has(key)) {
+            updatedPending[key] = deepMergePlain(pendingVal, newVal);
+          } else if (key === "handover" || key === "timeClock") {
+            // handover/timeClock: 2-niveau merge (datum → type/persoon) zodat een
+            // delta de al-gequeuede entries van dezelfde dag niet wegvaagt
             const merged = { ...pendingVal };
             for (const [dk, dv] of Object.entries(newVal)) {
               merged[dk] =
@@ -60028,7 +61570,12 @@ function AppInner() {
           !Array.isArray(pendingVal)
         ) {
           // staffAvailability/staffAvailabilityLocks: 2-niveau merge (persoon → datums)
-          if (key === "staffAvailability" || key === "staffAvailabilityLocks") {
+          if (DEEP_MERGE_FIELDS.has(key)) {
+            optimisticUpdate[key] = deepMergePlain(currentVal, pendingVal);
+          } else if (
+            key === "staffAvailability" ||
+            key === "staffAvailabilityLocks"
+          ) {
             const merged = { ...currentVal };
             for (const [person, dates] of Object.entries(pendingVal)) {
               merged[person] =
@@ -60529,7 +62076,12 @@ function AppInner() {
         !Array.isArray(serverVal)
       ) {
         // staffAvailability/staffAvailabilityLocks: 2-niveau merge (persoon → datums), voorkomt overschrijven
-        if (key === "staffAvailability" || key === "staffAvailabilityLocks") {
+        if (DEEP_MERGE_FIELDS.has(key)) {
+          result[key] = deepMergePlain(serverVal, localVal);
+        } else if (
+          key === "staffAvailability" ||
+          key === "staffAvailabilityLocks"
+        ) {
           const merged = { ...serverVal };
           for (const [person, dates] of Object.entries(localVal)) {
             if (typeof dates === "object" && dates !== null) {
@@ -61654,6 +63206,7 @@ function AppInner() {
 
   // 📬 Bereken ongelezen overdrachten voor alle tabs
   // 📬 Bereken ongelezen overdrachten vanaf VANDAAG + TOEKOMST (niet het verleden)
+  const dagbordAttention = getDagbordAttention(appData, loggedInUserName);
   const handoverUnreadCount = (() => {
     if (!appData.handover) return 0;
     const normalizeLogs = (data, dateKey) => {
@@ -62829,6 +64382,7 @@ function AppInner() {
           chatCount={chatUnreadCount}
           bingoBadge={bingoUnreadCount}
           handoverBadge={handoverUnreadCount}
+          dagbordBadge={dagbordAttention}
           onGoToAdmin={handleGoToAdmin}
           appData={appData}
         />
@@ -62872,6 +64426,10 @@ function AppInner() {
           onGoTo={(notif) => {
             if (notif.dateKey)
               setCurrentDay(new Date(notif.dateKey + "T12:00:00"));
+            if (notif.source === "dagbord") {
+              setView("dagbord");
+              return;
+            }
             if (notif.source) setPendingHandoverTab(notif.source);
             setView("handover");
           }}
@@ -63109,6 +64667,20 @@ function AppInner() {
                   }}
                   active={view === "occupancy"}
                   theme={currentTheme}
+                />
+              )}
+              {userRole !== "co" && (
+                <SidebarItem
+                  id="dagbord"
+                  icon={LayoutDashboard}
+                  label="Dagbord"
+                  onClick={() => {
+                    setView("dagbord");
+                    setCurrentDay(new Date());
+                  }}
+                  active={view === "dagbord"}
+                  theme={currentTheme}
+                  badge={dagbordAttention}
                 />
               )}
               {userRole !== "co" && (
@@ -63414,7 +64986,9 @@ function AppInner() {
                   size={22}
                   color={CP_LOGO_COLORS[currentTheme?.id] || "#b4d6a1"}
                 />
-                {(chatUnreadCount > 0 || handoverUnreadCount > 0) && (
+                {(chatUnreadCount > 0 ||
+                  handoverUnreadCount > 0 ||
+                  dagbordAttention > 0) && (
                   <span className="absolute top-2.5 right-2.5 w-2.5 h-2.5 bg-red-400 rounded-full border border-white/50 animate-pulse"></span>
                 )}
               </button>
@@ -64736,6 +66310,35 @@ function AppInner() {
                 currentDay={currentDay}
                 theme={currentTheme}
                 setCurrentDay={setCurrentDay}
+              />
+            </div>
+          ) : view === "dagbord" && userRole !== "co" ? (
+            <div className="w-full max-w-7xl mx-auto overflow-y-auto p-4 md:p-0 pb-24">
+              <div className="pb-3 mb-3">
+                <ViewHeader
+                  title="Dagbord"
+                  subtitle={toDutchDate(currentDay)}
+                  icon={LayoutDashboard}
+                  theme={currentTheme}
+                >
+                  <DateControls
+                    currentDay={currentDay}
+                    onPrev={prevDay}
+                    onNext={nextDay}
+                    onCalendar={() => setIsCalendarOpen(true)}
+                    theme={currentTheme}
+                  />
+                </ViewHeader>
+              </div>
+              <DagbordView
+                currentDay={currentDay}
+                appData={appData}
+                updateData={saveData}
+                loggedInUserName={loggedInUserName}
+                userRole={userRole}
+                getDailyTasks={getDailyTasks}
+                onCheckTask={handleCheckTask}
+                onNvtTask={handleNvtTask}
               />
             </div>
           ) : view === "handover" && userRole !== "co" ? (
