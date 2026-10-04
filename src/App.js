@@ -6901,7 +6901,7 @@ const BirthdayWidget = ({ staffList, currentDay, fmDob }) => {
 const ALL_QUICK_LINKS = [
   { id: "schedule", label: "Programma", icon: Calendar },
   { id: "rooster", label: "Rooster", icon: CalendarDays },
-  { id: "dagbord", label: "Dagbord", icon: LayoutDashboard },
+  { id: "dagbord", label: "Dagbord", icon: CalendarCheck2 },
   { id: "handover", label: "Overdrachten", icon: BookOpen },
   { id: "occupancy", label: "Bezetting", icon: Home },
   { id: "fm_checklist", label: "FM Checklist", icon: ClipboardCheck },
@@ -7973,8 +7973,7 @@ const DashboardContent = ({
         );
       }
       case "handover": {
-        // Dagbord staat nu zelf bovenaan het dashboard → widget niet dubbel tonen
-        return null;
+        if (userRole === "co") return null;
         // 🧩 Dagbord-widget (vervangt de losse overdracht-widget)
         const dbToday = appData.dagbord?.[toIsoDate(new Date())] || {};
         const dbBriefing =
@@ -7998,7 +7997,7 @@ const DashboardContent = ({
                 className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0"
                 style={{ backgroundColor: `${primary}1A` }}
               >
-                <LayoutDashboard size={18} style={{ color: primary }} />
+                <CalendarCheck2 size={18} style={{ color: primary }} />
               </div>
               <div className="flex-1 min-w-0">
                 <h3 className="text-sm font-bold" style={{ color: C.Lagoon }}>
@@ -35519,6 +35518,14 @@ const MobileMenu = ({
         <div className="flex-1 overflow-y-auto">
           {userRole !== "co" && (
             <MenuItem
+              icon={CalendarCheck2}
+              label="Dagbord"
+              target="dagbord"
+              badge={dagbordBadge}
+            />
+          )}
+          {userRole !== "co" && (
+            <MenuItem
               icon={LayoutDashboard}
               label="Dashboard"
               target="dashboard"
@@ -35530,14 +35537,6 @@ const MobileMenu = ({
           <MenuItem icon={CalendarIcon} label="Programma" target="schedule" />
           {userRole !== "co" && (
             <MenuItem icon={PieChart} label="Bezetting" target="occupancy" />
-          )}
-          {userRole !== "co" && (
-            <MenuItem
-              icon={LayoutDashboard}
-              label="Dagbord"
-              target="dagbord"
-              badge={dagbordBadge}
-            />
           )}
           {userRole !== "co" && (
             <MenuItem
@@ -36890,7 +36889,7 @@ const ChangePinView = ({
         );
         updateData({ staffList: newList });
         showAlert("Pincode succesvol gewijzigd!");
-        setView("dashboard");
+        setView("dagbord");
       } else {
         showAlert("Pincodes komen niet overeen. Probeer opnieuw.");
         setStep("new");
@@ -61360,7 +61359,7 @@ function AppInner() {
     // If logged in and session is valid, go to appropriate view
     if (checkLoginValidity()) {
       const role = localStorage.getItem("cp_userRole");
-      return role === "co" ? "schedule" : "dashboard";
+      return role === "co" ? "schedule" : "dagbord";
     }
     return "login";
   });
@@ -63973,7 +63972,7 @@ function AppInner() {
         setIsLoggedIn(true);
         setUserRole("fm");
         setLoggedInUserName("Maik");
-        setView("dashboard");
+        setView("dagbord");
         setCurrentDay(new Date());
         // Persist login
         localStorage.setItem("cp_loggedInUser", "Maik");
@@ -64012,7 +64011,7 @@ function AppInner() {
           setIsLoggedIn(true);
           setUserRole("staff");
           setLoggedInUserName(selectedStaff);
-          setView("dashboard");
+          setView("dagbord");
           setCurrentDay(new Date());
           // Persist login
           localStorage.setItem("cp_loggedInUser", selectedStaff);
@@ -65587,6 +65586,20 @@ function AppInner() {
             <>
               {userRole !== "co" && (
                 <SidebarItem
+                  id="dagbord"
+                  icon={CalendarCheck2}
+                  label="Dagbord"
+                  onClick={() => {
+                    setView("dagbord");
+                    setCurrentDay(new Date());
+                  }}
+                  active={view === "dagbord"}
+                  theme={currentTheme}
+                  badge={dagbordAttention}
+                />
+              )}
+              {userRole !== "co" && (
+                <SidebarItem
                   id="dash"
                   icon={LayoutDashboard}
                   label="Dashboard"
@@ -65647,20 +65660,6 @@ function AppInner() {
                   }}
                   active={view === "occupancy"}
                   theme={currentTheme}
-                />
-              )}
-              {userRole !== "co" && (
-                <SidebarItem
-                  id="dagbord"
-                  icon={LayoutDashboard}
-                  label="Dagbord"
-                  onClick={() => {
-                    setView("dagbord");
-                    setCurrentDay(new Date());
-                  }}
-                  active={view === "dagbord"}
-                  theme={currentTheme}
-                  badge={dagbordAttention}
                 />
               )}
               {userRole !== "co" && (
@@ -66899,29 +66898,6 @@ function AppInner() {
                   );
                 })()}
 
-                {/* 🧩 DAGBORD — hoofdpagina: dienst, briefing, planning, punten */}
-                {userRole !== "co" && (
-                  <DagbordView
-                    currentDay={currentDay}
-                    appData={appData}
-                    updateData={saveData}
-                    loggedInUserName={loggedInUserName}
-                    userRole={userRole}
-                    getDailyTasks={getDailyTasks}
-                    onCheckTask={handleCheckTask}
-                    onNvtTask={handleNvtTask}
-                  />
-                )}
-                {userRole !== "co" && (
-                  <div className="flex items-center gap-3 pt-4 pb-1">
-                    <div className="h-px flex-1 bg-gray-200" />
-                    <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">
-                      Dashboard
-                    </span>
-                    <div className="h-px flex-1 bg-gray-200" />
-                  </div>
-                )}
-
                 {/* ═══════════════════════════════════════════════════
                     DASHBOARD GRID — 3 kolommen, drag & drop, resize
                     ═══════════════════════════════════════════════════ */}
@@ -67321,7 +67297,7 @@ function AppInner() {
                 <ViewHeader
                   title="Dagbord"
                   subtitle={toDutchDate(currentDay)}
-                  icon={LayoutDashboard}
+                  icon={CalendarCheck2}
                   theme={currentTheme}
                 >
                   <DateControls
