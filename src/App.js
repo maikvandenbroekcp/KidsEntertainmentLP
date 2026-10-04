@@ -58809,7 +58809,38 @@ const dbPlanned = (appData, dateKey, name) => {
     return { start: ws.start || "", end: ws.end || "", code: "" };
   return null;
 };
-const DB_TOLERANTIE = 5; // minuten speling voor te laat / te vroeg weg
+const DB_TOLERANTIE = 5;
+// Afdeling waarop iemand die dag ingeroosterd staat (null = onbekend)
+const dbMyAfdeling = (appData, dateKey, name) => {
+  const fromText = (t) => {
+    const x = String(t || "").toLowerCase();
+    if (x.includes("hotspot")) return "hotspot";
+    if (x.includes("spring") || x.includes("kussen")) return "springkussen";
+    if (x.includes("crea") || x.includes("atelier")) return "crea";
+    if (x.includes("entertain") || x.includes("ent ")) return "entertainment";
+    return null;
+  };
+  const rd = (appData.roosterDiensten?.[dateKey] || []).find((d) =>
+    (d.assigned || []).includes(name)
+  );
+  if (rd) {
+    if (["entertainment", "crea", "springkussen"].includes(rd.type)) return rd.type;
+    const t = fromText(rd.title);
+    if (t) return t;
+  }
+  const ws = (appData.workSchedule?.[dateKey] || []).find(
+    (x) => x.matchedUser === name
+  );
+  if (ws) {
+    const t = fromText(`${ws.location || ""} ${ws.loc || ""} ${ws.role || ""} ${ws.dept || ""}`);
+    if (t) return t;
+  }
+  // Anders: afdeling van de activiteiten waar je op staat
+  const act = (appData.schedule || []).find(
+    (a) => a.date === dateKey && (a.staff || []).includes(name)
+  );
+  return act ? dbActAfdeling(act) : null;
+}; // minuten speling voor te laat / te vroeg weg
 
 // Telt wat de ingelogde gebruiker op het dagbord nog moet zien
 const getDagbordAttention = (appData, loggedInUserName) => {
@@ -58869,6 +58900,12 @@ const DagbordView = ({
     } catch (e) {}
   };
   const matchAfd = (a) => afdeling === "alle" || !a || a === "alle" || a === afdeling;
+
+  // Automatisch openen op de afdeling waar je vandaag op ingepland staat
+  const ingeplandOp = dbMyAfdeling(appData, dateKey, me);
+  useEffect(() => {
+    if (ingeplandOp) setAfdeling(ingeplandOp);
+  }, [dateKey, ingeplandOp]); // eslint-disable-line
 
   const [openAct, setOpenAct] = useState(null); // actId dat uitgeklapt is
   const [editingRep, setEditingRep] = useState(null); // actId waarvoor formulier open is
@@ -59679,6 +59716,14 @@ const DagbordView = ({
       {/* Samenvatting + afdelingsfilter */}
       <div className="flex flex-wrap items-center gap-2 justify-between">
         <div className="flex flex-wrap gap-1.5">
+          {ingeplandOp && (
+            <span className="text-[11px] text-gray-500 self-center mr-1">
+              {isToday ? "Vandaag" : "Deze dag"} ingepland op{" "}
+              <span className="font-semibold" style={{ color: dbAfdeling(ingeplandOp).text }}>
+                {dbAfdeling(ingeplandOp).label}
+              </span>
+            </span>
+          )}
           {DB_AFDELINGEN.map((a) => (
             <button
               key={a.id}
